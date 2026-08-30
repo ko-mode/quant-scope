@@ -4,7 +4,7 @@
 # which remains the source of truth. Requires: just, uv (backend),
 # pnpm (frontend), docker (for `just dev` / `just compose-config`).
 #
-# Phase 1 will add `seed` and `ingest-demo` once those CLI commands exist.
+# Phase 1B will add `seed` and `ingest-demo` once those CLI commands exist.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
@@ -35,6 +35,14 @@ typecheck:
 # Enforce the quant engine dependency contract
 import-boundaries:
     cd backend && uv run lint-imports
+
+# Apply database migrations (uses QUANTSCOPE_DATABASE_URL / its dev default)
+migrate:
+    cd backend && uv run alembic upgrade head
+
+# Fail if the models have drifted from the migrations
+db-check:
+    cd backend && uv run alembic check
 
 # Everything CI runs except Docker image builds
 check: lint typecheck import-boundaries test

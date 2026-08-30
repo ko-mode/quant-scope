@@ -58,6 +58,8 @@ ignore = ["E501"]  # wrapping is handled by the formatter
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
 "alembic/env.py" = ["E402"]
+# ORM columns are named for their SQL identity (id, open); shadowing builtins is idiomatic here.
+"src/quantscope/db/models/*" = ["A003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["quantscope"]

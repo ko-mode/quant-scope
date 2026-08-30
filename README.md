@@ -63,10 +63,12 @@ below and remains the source of truth.
 | `just lint`              | backend `ruff check` + `ruff format --check`; frontend `pnpm lint` |
 | `just typecheck`         | backend `mypy`; frontend `pnpm typecheck`                  |
 | `just import-boundaries` | backend `lint-imports` (quant dependency contract)          |
+| `just migrate`           | backend `alembic upgrade head`                              |
+| `just db-check`          | backend `alembic check` (models vs migrations)              |
 | `just check`             | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
 | `just compose-config`    | `docker compose config` (no daemon needed)                  |
 
-`just seed` and `just ingest-demo` are added in Phase 1, once those CLI commands
+`just seed` and `just ingest-demo` are added in Phase 1B, once those CLI commands
 exist.
 
 ---
@@ -111,7 +113,9 @@ uv run uvicorn quantscope.main:app --reload --port 8000
 curl -s http://localhost:8000/health
 ```
 
-A database is **not** required for `/health` or the test suite in Phase 0.
+A database is **not** required for `/health`. Most of the test suite also runs
+without one; the database-backed schema tests are skipped unless
+`QUANTSCOPE_TEST_DATABASE_URL` points at a **disposable** PostgreSQL database.
 
 Checks (all run in CI):
 
@@ -120,8 +124,16 @@ uv run ruff check .          # lint
 uv run ruff format --check . # formatting
 uv run mypy                  # type check (strict on quantscope.quant)
 uv run lint-imports          # enforce the quant dependency contract
-uv run pytest                # tests
-uv run alembic history       # migration history (empty until Phase 1)
+uv run pytest                # tests (DB schema tests skipped without QUANTSCOPE_TEST_DATABASE_URL)
+uv run alembic history       # migration history
+```
+
+Run the migration and the model/migration drift check against a database:
+
+```bash
+export QUANTSCOPE_DATABASE_URL=postgresql+psycopg://quantscope:quantscope@localhost:5432/quantscope
+uv run alembic upgrade head       # or: just migrate
+uv run alembic check              # or: just db-check  -> "No new upgrade operations detected."
 ```
 
 ### Frontend

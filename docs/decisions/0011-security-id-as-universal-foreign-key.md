@@ -20,6 +20,11 @@ A `ticker_history` table (ticker valid-from/valid-to per `security_id`) is
 deferred; when added, existing joins are unaffected because none of them use the
 ticker.
 
+Foreign keys to `security` use **`ON DELETE RESTRICT`**. A security is the stable
+root of its historical observations, so deleting one that still has child rows
+(e.g. `price_bar`) is refused. Lifecycle changes use `security.is_active` and
+`security.delisted_date`, never row deletion.
+
 ## Consequences
 
 - Ticker renames become a one-row update on `security` (plus a `ticker_history`

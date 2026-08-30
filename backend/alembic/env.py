@@ -1,8 +1,10 @@
 """Alembic migration environment.
 
-The SQLAlchemy URL comes from ``quantscope.config`` so migrations and the
-application always agree on the target database. ``target_metadata`` is the ORM
-declarative base's metadata; model modules will populate it in Phase 1.
+The SQLAlchemy URL comes from ``quantscope.config`` for command-line use. Tests
+inject a live connection via ``config.attributes["connection"]`` so migrations
+run against a disposable database without touching process settings.
+``target_metadata`` is the ORM declarative base's metadata; importing
+``quantscope.db.models`` registers every table on it.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from quantscope.config import get_settings
+from quantscope.db import models as _models  # noqa: F401  (registers tables on Base.metadata)
 from quantscope.db.base import Base
 
 config = context.config
@@ -38,6 +41,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    injected_connection = config.attributes.get("connection", None)
+    if injected_connection is not None:
+        context.configure(
+            connection=injected_connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

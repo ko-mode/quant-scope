@@ -25,13 +25,15 @@ Phase 0 recipes:
 | `just lint`       | backend `ruff check` + `ruff format --check`; frontend `pnpm lint` |
 | `just typecheck`  | backend `uv run mypy`; frontend `pnpm typecheck`              |
 | `just import-boundaries` | backend `uv run lint-imports`                          |
+| `just migrate`    | backend `uv run alembic upgrade head` (added in Phase 1A)     |
+| `just db-check`   | backend `uv run alembic check` - models vs migrations (Phase 1A) |
 | `just check`      | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
 | `just compose-config` | `docker compose config`                                  |
 
 `README.md` retains every raw command as the source of truth. The `justfile`
 must not grow logic beyond delegation.
 
-**Phase 1 will add** `just seed` and `just ingest-demo` **once those CLI
+**Phase 1B will add** `just seed` and `just ingest-demo` **once those CLI
 commands exist** - not before.
 
 ## Consequences
