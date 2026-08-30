@@ -122,6 +122,14 @@ def test_security_cik_ten_digits_allowed(session: Session) -> None:
     session.flush()
 
 
+def test_security_asset_type_may_be_null(session: Session) -> None:
+    sec = _security(ticker="UNK", asset_type=None)
+    session.add(sec)
+    session.flush()
+    session.refresh(sec)
+    assert sec.asset_type is None
+
+
 # --------------------------------------------------------------------------- #
 # price_bar constraints
 # --------------------------------------------------------------------------- #

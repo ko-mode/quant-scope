@@ -40,12 +40,17 @@ def test_security_columns_and_nullability() -> None:
         "name",
         "exchange",
         "currency",
-        "asset_type",
         "is_active",
         "created_at",
         "updated_at",
     }
-    expected_nullable = {"cik", "first_trade_date", "last_trade_date", "delisted_date"}
+    expected_nullable = {
+        "cik",
+        "asset_type",  # nullable since migration 0002 (ADR 0021)
+        "first_trade_date",
+        "last_trade_date",
+        "delisted_date",
+    }
     assert set(cols.keys()) == expected_not_null | expected_nullable
     assert {c.name for c in cols if not c.nullable} == expected_not_null
 

@@ -65,11 +65,12 @@ below and remains the source of truth.
 | `just import-boundaries` | backend `lint-imports` (quant dependency contract)          |
 | `just migrate`           | backend `alembic upgrade head`                              |
 | `just db-check`          | backend `alembic check` (models vs migrations)              |
+| `just seed *ARGS`        | backend `quantscope seed-securities` (security universe from SEC) |
 | `just check`             | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
 | `just compose-config`    | `docker compose config` (no daemon needed)                  |
 
-`just seed` and `just ingest-demo` are added in Phase 1B, once those CLI commands
-exist.
+`just ingest-demo` (price data for the demo tickers) is added in Phase 1C, once
+that CLI command exists.
 
 ---
 
@@ -135,6 +136,39 @@ export QUANTSCOPE_DATABASE_URL=postgresql+psycopg://quantscope:quantscope@localh
 uv run alembic upgrade head       # or: just migrate
 uv run alembic check              # or: just db-check  -> "No new upgrade operations detected."
 ```
+
+### Seed the security universe (Phase 1B)
+
+Populates the `security` table from SEC reference data
+(`company_tickers_exchange.json`). Requires the migration to have been applied.
+
+```bash
+export QUANTSCOPE_DATABASE_URL=postgresql+psycopg://quantscope:quantscope@localhost:5432/quantscope
+export QUANTSCOPE_SEC_USER_AGENT="YourName your.email@example.com"   # SEC requires this
+
+uv run quantscope seed-securities              # fetch from SEC        (or: just seed)
+uv run quantscope seed-securities --dry-run    # fetch + normalise, write nothing
+```
+
+The dataset is never committed (ADR 0015). To work offline, download the file
+once and pass it in:
+
+```bash
+curl -A "$QUANTSCOPE_SEC_USER_AGENT" -o sec.json \
+  https://www.sec.gov/files/company_tickers_exchange.json
+uv run quantscope seed-securities --source-file sec.json   # or: just seed -- --source-file sec.json
+```
+
+Re-running the seed is idempotent: unchanged rows are untouched, `security.id`
+values are stable, and rows that vanish from a later SEC snapshot are **not**
+deleted or deactivated. Each run is logged as JSON lines and recorded in
+`data_ingestion_run`.
+
+V1 scope (ADR 0021): **exchange-listed US securities only** - OTC records are
+rejected with reason `unsupported_exchange_v1:OTC`. `security.exchange` is a
+MIC-style code **normalised from the single SEC exchange label**; it is not
+cross-verified listing-venue metadata and may differ from a security's true
+primary listing (e.g. SEC labels `SPY` "NYSE").
 
 ### Frontend
 

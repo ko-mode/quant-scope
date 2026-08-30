@@ -187,21 +187,25 @@ src/quantscope/
 │   ├── performance.py      Sharpe, Sortino, CAGR, tracking error
 │   ├── factors.py          FF3 OLS regression + HAC (Newey-West) SEs
 │   └── calendar.py         XNYS trading calendar wrapper, session alignment
+├── logging_setup.py       structured JSON-line logging for CLI jobs
 ├── data/
 │   ├── providers/
-│   │   ├── base.py         PriceProvider, FundamentalsProvider, FactorProvider
+│   │   ├── base.py         SecurityReferenceProvider (+ Price/Fundamentals/Factor later)
+│   │   ├── sec_edgar.py    company_tickers_exchange parse + provider
 │   │   ├── stooq.py
-│   │   ├── sec_edgar.py
 │   │   └── fama_french.py
+│   ├── reference.py        SEC-label -> exchange-code map (listed-only in V1),
+│   │                       CIK/ticker normalisation, curated-only asset-type
+│   ├── security_seed.py    fetch -> normalise -> upsert -> record run
 │   ├── canonical_metrics.py  ordered US-GAAP tag lists per displayed metric
 │   ├── validation.py       Pandera schema + sanity rules + demo spot-checks
 │   └── ingest.py           fetch -> validate -> normalise -> upsert
 ├── db/
-│   ├── base.py             DeclarativeBase
+│   ├── base.py             DeclarativeBase (+ constraint naming convention)
 │   ├── session.py          engine + sessionmaker + get_session dependency
 │   ├── models/             security, price_bar, factor_return,
 │   │                       fundamental_fact, data_ingestion_run
-│   └── repositories/       one repository per aggregate
+│   └── repositories/       securities.upsert_securities (+ more per aggregate)
 └── jobs/
     └── cli.py              seed-securities, ingest-prices, ingest-demo ...
 ```
@@ -302,19 +306,21 @@ Five tables. One extension (`pg_trgm`, for ticker/name search). Full column
 lists and the rationale for what is intentionally *absent* are in
 [ADR 0004](./decisions/0004-postgresql-and-provenance-fields.md),
 [ADR 0011](./decisions/0011-security-id-as-universal-foreign-key.md),
-[ADR 0012](./decisions/0012-total-return-via-vendor-adjusted-close.md) and
-[ADR 0013](./decisions/0013-risk-free-rate-from-fama-french-series.md).
+[ADR 0012](./decisions/0012-total-return-via-vendor-adjusted-close.md),
+[ADR 0013](./decisions/0013-risk-free-rate-from-fama-french-series.md) and
+[ADR 0021](./decisions/0021-security-universe-seeding.md).
 
 | Table                 | Purpose                                             | Key provenance columns                     |
 |-----------------------|-----------------------------------------------------|--------------------------------------------|
-| `security`            | Reference data for the searchable US-equity universe. Internal `id` PK; **all FKs reference `security_id`, never `ticker`.** | -                                          |
+| `security`            | Reference data for the searchable US-equity universe, seeded from SEC (ADR 0021). Internal `id` PK; **all FKs reference `security_id`, never `ticker`**. `exchange` is a MIC-style code **normalised from the SEC exchange label** (single-source, not verified listing metadata); V1 is exchange-listed only (OTC excluded). `asset_type` / `cik` are **nullable** - set only when reliably determinable, never guessed. | -                                          |
 | `price_bar`           | Daily OHLCV per security. Both raw `close` and vendor `adj_close` stored. | `source`, `ingested_at`; PK `(security_id, trade_date, source)` |
 | `factor_return`       | Daily Fama-French factor returns, including `rf`. `frequency` column keeps monthly factors possible later. | `source`, `ingested_at`; PK `(factor_name, frequency, trade_date, source)` |
 | `fundamental_fact`    | Point-in-time company facts from SEC EDGAR. Restatements inserted as new rows; resolved metrics record which tag/accession they used. | `filed_date` (mandatory), `accession_no`, `form`, `taxonomy`, `tag`, `unit`, `source`, `ingested_at` |
 | `data_ingestion_run`  | Audit row per ingestion invocation (status, rows, error, time range). | is the provenance record                   |
 
-Migration order: **M1** `security`, `price_bar`, `data_ingestion_run`, `pg_trgm`
-(Phase 1) -> **M2** `factor_return` (Phase 2) -> **M3** `fundamental_fact`
+Migration order: **0001** `security`, `price_bar`, `data_ingestion_run`,
+`pg_trgm` (Phase 1A) -> **0002** `security.asset_type` nullable (Phase 1B,
+ADR 0021) -> **M2** `factor_return` (Phase 2) -> **M3** `fundamental_fact`
 (Phase 3).
 
 ---
@@ -360,6 +366,8 @@ Kept reachable by the architecture; **not built or scaffolded** in the MVP.
 | Ledoit-Wolf / shrinkage covariance                   | Sample covariance is adequate for small comparison sets; documented as a limitation. |
 | Rolling factor betas, FF5, momentum factor           | Full-sample FF3 with HAC SEs. `factor_return` schema already allows more factors.  |
 | Multi-exchange calendars, non-USD, ADRs              | XNYS + USD asserted at ingestion; violations rejected, never silently coerced.     |
+| OTC securities in the seeded universe                | V1 is exchange-listed only; OTC recognised but rejected `unsupported_exchange_v1:OTC` (ADR 0021). Re-enable via `SUPPORTED_EXCHANGES`, no model change. |
+| Cross-provider listing-venue verification            | `security.exchange` is a single-source normalisation of the SEC label (ADR 0021). |
 | Monte Carlo simulation                               | Portfolio-phase feature.                                                          |
 
 Known data limitations accepted for the MVP (surfaced in responses, not hidden):
@@ -376,16 +384,26 @@ Monorepo layout; `docker-compose` (db + backend + frontend); `uv` / `pnpm`
 tooling; `justfile`; Ruff, mypy (strict on `quant`), pytest, `import-linter`
 contract; GitHub Actions CI; pre-commit; Alembic wired with **no migration
 yet**; FastAPI app factory + `/health`; Next.js shell with the TanStack Query
-provider; `.env.example`; README; `docs/architecture.md` + ADRs 0001-0020.
+provider; `.env.example`; README; `docs/architecture.md` + ADRs 0001-0021.
 
 ### Phase 1 - Search + market-data ingestion
-`PriceProvider` Protocol + Stooq implementation (cassette tests); Pandera
-validation + sanity rules; **demo corporate-action / adjusted-price spot-check
-(NVDA 10:1 split)**; `data/ingest.py`; security seeding from SEC; repositories;
-`typer` CLI with `just seed` / `just ingest-demo`; endpoints `GET /securities`,
-`GET /securities/{ticker}`, `GET /securities/{ticker}/prices`. Frontend: search
--> ticker page + price chart. No committed datasets - fetch instructions +
-synthetic fixtures only. **Migration M1.**
+Delivered in sub-phases:
+- **1A** *(done)* - ORM models + migration `0001` (`security`, `price_bar`,
+  `data_ingestion_run`, `pg_trgm`); model/constraint tests against PostgreSQL.
+- **1B** *(in review)* - security-universe seeding from SEC
+  `company_tickers_exchange.json`: source adapter, exchange-label normalisation
+  (exchange-listed only; OTC excluded), CIK/ticker normalisation, curated-only
+  asset-type classification, idempotent upsert, `quantscope seed-securities` CLI
+  + `just seed`, structured logging, `data_ingestion_run` recording. Migration
+  `0002` (`asset_type` nullable).
+- **1C** - `PriceProvider` Protocol + Stooq implementation (cassette tests);
+  Pandera validation + sanity rules; **demo corporate-action / adjusted-price
+  spot-check (NVDA 10:1 split)**; `data/ingest.py`; `just ingest-demo`;
+  endpoints `GET /securities`, `GET /securities/{ticker}`,
+  `GET /securities/{ticker}/prices`. Frontend: search -> ticker page + price
+  chart.
+
+No committed datasets - fetch instructions + synthetic fixtures only.
 
 ### Phase 2 - Deterministic single-name analytics
 `quant/conventions`, `quant/returns|risk|drawdown|performance` with
@@ -436,3 +454,4 @@ AI evaluation harness.
 | DataFrame contracts | pandas + Pandera at the boundary; no wrappers     | 0018 |
 | Product priorities | Correctness > architecture > dashboard > setup > methodology > breadth | 0019 |
 | Task runner       | Thin cross-platform `justfile`; README keeps raw commands | 0020 |
+| Security seeding  | SEC reference data; label-derived exchange codes; exchange-listed only (OTC excluded); nullable asset_type; idempotent upsert | 0021 |

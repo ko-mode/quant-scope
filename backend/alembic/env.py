@@ -20,8 +20,11 @@ from quantscope.db.base import Base
 
 config = context.config
 
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+# Only (re)configure logging for standalone CLI use. When a connection is
+# injected (tests, programmatic callers) leave the caller's logging alone -
+# fileConfig() would otherwise tear down handlers such as pytest's caplog.
+if config.config_file_name is not None and config.attributes.get("connection") is None:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 

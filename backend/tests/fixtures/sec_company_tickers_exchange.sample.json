@@ -1,0 +1,20 @@
+{
+  "fields": ["cik", "name", "ticker", "exchange"],
+  "data": [
+    [1045810, "NVIDIA CORP", "NVDA", "Nasdaq"],
+    [2488, "Advanced Micro Devices Inc.", "AMD", "Nasdaq"],
+    [50863, "INTEL CORP", "INTC", "Nasdaq"],
+    [320193, "Apple Inc.", "AAPL", "Nasdaq"],
+    [789019, "MICROSOFT CORP", "MSFT", "Nasdaq"],
+    [884394, "SPDR S&P 500 ETF TRUST", "SPY", "NYSE Arca"],
+    [19617, "JPMORGAN CHASE & CO", "JPM", "NYSE"],
+    [1090727, "UNITED PARCEL SERVICE INC", "UPS", "NYSE"],
+    [1000000, "FICTIONAL OTC HOLDINGS", "FAKEO", "OTC"],
+    [1000001, "NO EXCHANGE GIVEN CO", "NOEXCH", null],
+    [1000002, "UNKNOWN VENUE CO", "WEIRD", "Toronto"],
+    [999999999999, "BAD CIK CO", "BADCIK", "NYSE"],
+    [1000003, "", "NONAME", "NYSE"],
+    [1000004, "BLANK TICKER CO", "", "NYSE"],
+    [1045810, "NVIDIA CORP (DUPLICATE ROW)", "NVDA", "Nasdaq"]
+  ]
+}

@@ -12,13 +12,17 @@ dependencies = [
     "sqlalchemy>=2.0.36,<2.1",
     "alembic>=1.14,<2",
     "psycopg[binary]>=3.2,<4",
+    "httpx>=0.27,<0.29",
+    "typer>=0.12,<0.16",
 ]
+
+[project.scripts]
+quantscope = "quantscope.jobs.cli:app"
 
 [dependency-groups]
 dev = [
     "pytest>=8.3,<9",
     "pytest-cov>=6.0,<7",
-    "httpx>=0.27,<0.29",
     "ruff>=0.8.6,<0.9",
     "mypy>=1.14,<2",
     "import-linter>=2.1,<3",
@@ -60,6 +64,8 @@ ignore = ["E501"]  # wrapping is handled by the formatter
 "alembic/env.py" = ["E402"]
 # ORM columns are named for their SQL identity (id, open); shadowing builtins is idiomatic here.
 "src/quantscope/db/models/*" = ["A003"]
+# Typer uses callables (typer.Option/Argument) as parameter defaults by design.
+"src/quantscope/jobs/cli.py" = ["B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["quantscope"]
@@ -129,6 +135,8 @@ forbidden_modules = [
     "requests",
     "pydantic",
     "pydantic_settings",
+    "typer",
+    "click",
     "yfinance",
     "pandas_datareader",
 ]

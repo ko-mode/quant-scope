@@ -4,10 +4,15 @@
 # which remains the source of truth. Requires: just, uv (backend),
 # pnpm (frontend), docker (for `just dev` / `just compose-config`).
 #
-# Phase 1B will add `seed` and `ingest-demo` once those CLI commands exist.
+# `ingest-demo` (price data for the demo tickers) is added in Phase 1C.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+
+# Force UTF-8 for child processes: some tools (import-linter/rich) emit non-ASCII
+# and crash when Windows hands them a cp1252 stdout.
+export PYTHONUTF8 := "1"
+export PYTHONIOENCODING := "utf-8"
 
 # Show available recipes
 default:
@@ -43,6 +48,11 @@ migrate:
 # Fail if the models have drifted from the migrations
 db-check:
     cd backend && uv run alembic check
+
+# Seed the security universe from SEC reference data.
+# Needs network; or pass a local file: `just seed -- --source-file path/to.json`.
+seed *ARGS:
+    cd backend && uv run quantscope seed-securities {{ARGS}}
 
 # Everything CI runs except Docker image builds
 check: lint typecheck import-boundaries test

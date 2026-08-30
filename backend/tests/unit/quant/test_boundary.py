@@ -23,6 +23,8 @@ FORBIDDEN_PREFIXES = (
     "requests",
     "pydantic",
     "pydantic_settings",
+    "typer",
+    "click",
     "yfinance",
     "pandas_datareader",
     "quantscope.api",

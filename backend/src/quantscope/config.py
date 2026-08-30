@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     price_provider: str = "stooq"
     default_benchmark_ticker: str = "SPY"
 
+    # SEC EDGAR. SEC's access policy requires a User-Agent identifying the caller
+    # with contact info; override this before running against the live service.
+    sec_user_agent: str = "QuantScope/0.1 (set QUANTSCOPE_SEC_USER_AGENT)"
+    sec_company_tickers_url: str = "https://www.sec.gov/files/company_tickers_exchange.json"
+
     # CORS origins allowed to call the API (the Next.js dev server by default).
     cors_allow_origins: tuple[str, ...] = ("http://localhost:3000",)
 

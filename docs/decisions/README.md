@@ -29,3 +29,4 @@ Superseding a decision means adding a new ADR and marking the old one
 | 0018 | DataFrame contracts at the quant boundary           | Accepted |
 | 0019 | Product priorities (CV project)                     | Accepted |
 | 0020 | Thin cross-platform task runner (`justfile`)        | Accepted |
+| 0021 | Security-universe seeding from SEC reference data   | Accepted |

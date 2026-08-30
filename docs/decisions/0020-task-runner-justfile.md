@@ -27,14 +27,15 @@ Phase 0 recipes:
 | `just import-boundaries` | backend `uv run lint-imports`                          |
 | `just migrate`    | backend `uv run alembic upgrade head` (added in Phase 1A)     |
 | `just db-check`   | backend `uv run alembic check` - models vs migrations (Phase 1A) |
+| `just seed *ARGS` | backend `uv run quantscope seed-securities` (added in Phase 1B) |
 | `just check`      | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
 | `just compose-config` | `docker compose config`                                  |
 
 `README.md` retains every raw command as the source of truth. The `justfile`
 must not grow logic beyond delegation.
 
-**Phase 1B will add** `just seed` and `just ingest-demo` **once those CLI
-commands exist** - not before.
+`just ingest-demo` (price data for the demo tickers) is added in Phase 1C, once
+that CLI command exists - not before.
 
 ## Consequences
 

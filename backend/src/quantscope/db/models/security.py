@@ -41,7 +41,10 @@ class Security(Base):
     cik: Mapped[str | None] = mapped_column(String(10))
     exchange: Mapped[str] = mapped_column(String(16), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default=text("'USD'"))
-    asset_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Nullable: the seed source (SEC company_tickers_exchange) carries no asset-type
+    # field, so it is set only where determinable from a curated source (migration
+    # 0002, ADR 0021). Never guessed.
+    asset_type: Mapped[str | None] = mapped_column(String(16))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     first_trade_date: Mapped[datetime.date | None] = mapped_column(Date)
     last_trade_date: Mapped[datetime.date | None] = mapped_column(Date)
@@ -58,7 +61,7 @@ class Security(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "asset_type IN ('common_stock', 'etf', 'index')",
+            "asset_type IS NULL OR asset_type IN ('common_stock', 'etf', 'index')",
             name="asset_type_allowed",
         ),
         CheckConstraint("currency = 'USD'", name="currency_usd_only"),
