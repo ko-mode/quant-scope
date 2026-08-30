@@ -1,0 +1,140 @@
+[project]
+name = "quantscope"
+version = "0.1.0"
+description = "QuantScope - quantitative equity research platform (backend)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.32,<0.35",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.5,<3",
+    "sqlalchemy>=2.0.36,<2.1",
+    "alembic>=1.14,<2",
+    "psycopg[binary]>=3.2,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6.0,<7",
+    "httpx>=0.27,<0.29",
+    "ruff>=0.8.6,<0.9",
+    "mypy>=1.14,<2",
+    "import-linter>=2.1,<3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantscope"]
+
+# -----------------------------------------------------------------------------
+# Ruff - linter + formatter
+# -----------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",  # pycodestyle + pyflakes
+    "I",            # isort
+    "N",            # pep8-naming
+    "UP",           # pyupgrade
+    "B",            # flake8-bugbear
+    "A",            # flake8-builtins
+    "C4",           # flake8-comprehensions
+    "SIM",          # flake8-simplify
+    "PTH",          # flake8-use-pathlib
+    "RUF",
+]
+ignore = ["E501"]  # wrapping is handled by the formatter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"alembic/env.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["quantscope"]
+
+# -----------------------------------------------------------------------------
+# mypy - baseline strict everywhere, fully strict on the pure quant engine
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+files = ["src/quantscope", "tests"]
+plugins = ["pydantic.mypy"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+# The pure analytics package is held to the strictest standard.
+module = "quantscope.quant.*"
+disallow_any_generics = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# -----------------------------------------------------------------------------
+# import-linter - enforces the quant engine dependency boundary
+# -----------------------------------------------------------------------------
+[tool.importlinter]
+root_package = "quantscope"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+# quantscope.quant may import ONLY: the stdlib, numpy, pandas, scipy, statsmodels,
+# pandera. This contract enumerates everything it must NOT reach - all other
+# application packages plus web / DB / HTTP / vendor libraries - so anything
+# outside the allowed set is rejected (ADR 0002, ADR 0017, ADR 0018).
+name = "quant engine dependency contract (stdlib + numpy/pandas/scipy/statsmodels/pandera only)"
+type = "forbidden"
+source_modules = ["quantscope.quant"]
+forbidden_modules = [
+    "quantscope.api",
+    "quantscope.services",
+    "quantscope.data",
+    "quantscope.db",
+    "quantscope.config",
+    "quantscope.main",
+    "quantscope.jobs",
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "sqlalchemy",
+    "alembic",
+    "psycopg",
+    "httpx",
+    "requests",
+    "pydantic",
+    "pydantic_settings",
+    "yfinance",
+    "pandas_datareader",
+]
+
+# -----------------------------------------------------------------------------
+# pytest
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --strict-markers --strict-config"
+testpaths = ["tests"]

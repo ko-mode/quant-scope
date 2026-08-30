@@ -1,0 +1,2 @@
+# No migrations yet. The first migration (Phase 1) creates: security, price_bar,
+# data_ingestion_run, plus the pg_trgm extension for ticker/name search.

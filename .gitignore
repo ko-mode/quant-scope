@@ -1,0 +1,35 @@
+# --- Python -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.import_linter_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- Node / Next.js ----------------------------------------------------------
+node_modules/
+.pnpm-store/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+*.tsbuildinfo
+
+# --- Environment -----------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# --- Editors / OS ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Lockfiles are intentionally tracked: uv.lock, pnpm-lock.yaml

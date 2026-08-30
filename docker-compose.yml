@@ -1,0 +1,53 @@
+# QuantScope local development stack: PostgreSQL + FastAPI backend + Next.js frontend.
+# `version:` is intentionally omitted (obsolete in Compose v2+).
+name: quantscope
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-quantscope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quantscope}
+      POSTGRES_DB: ${POSTGRES_DB:-quantscope}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quantscope} -d ${POSTGRES_DB:-quantscope}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      # Inside the compose network the database host is `db`, not `localhost`.
+      QUANTSCOPE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-quantscope}:${POSTGRES_PASSWORD:-quantscope}@db:5432/${POSTGRES_DB:-quantscope}
+      QUANTSCOPE_ENVIRONMENT: ${QUANTSCOPE_ENVIRONMENT:-development}
+      QUANTSCOPE_PRICE_PROVIDER: ${QUANTSCOPE_PRICE_PROVIDER:-stooq}
+      QUANTSCOPE_DEFAULT_BENCHMARK_TICKER: ${QUANTSCOPE_DEFAULT_BENCHMARK_TICKER:-SPY}
+    ports:
+      - "${QUANTSCOPE_BACKEND_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
