@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     sec_user_agent: str = "QuantScope/0.1 (set QUANTSCOPE_SEC_USER_AGENT)"
     sec_company_tickers_url: str = "https://www.sec.gov/files/company_tickers_exchange.json"
 
+    # Stooq daily price CSV endpoint (Phase 1C dev provider; see ADR 0022).
+    stooq_base_url: str = "https://stooq.com/q/d/l/"
+
     # CORS origins allowed to call the API (the Next.js dev server by default).
     cors_allow_origins: tuple[str, ...] = ("http://localhost:3000",)
 

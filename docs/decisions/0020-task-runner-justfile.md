@@ -34,7 +34,7 @@ Phase 0 recipes:
 `README.md` retains every raw command as the source of truth. The `justfile`
 must not grow logic beyond delegation.
 
-`just ingest-demo` (price data for the demo tickers) is added in Phase 1C, once
+`just ingest-demo` (price data for the demo tickers) is added in Phase 1D, once
 that CLI command exists - not before.
 
 ## Consequences

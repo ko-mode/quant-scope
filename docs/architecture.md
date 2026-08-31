@@ -1,9 +1,10 @@
 # QuantScope - Architecture
 
 **Status:** approved for implementation (MVP scope = Phases 0-3)
-**Last updated:** 2026-08-30 (Phase 0 review: provenance, fundamentals mapping,
+**Last updated:** 2026-08-30 - Phase 0 review (provenance, fundamentals mapping,
 quant conventions, dependency contract, DataFrame contracts, product priorities,
-task runner locked)
+task runner); Phase 1A-1C in progress (ADRs 0021-0022; Phase 1 split into
+sub-phases 1A-1F)
 
 QuantScope is a quantitative equity research platform. This document describes
 the architecture that has been approved for the initial, CV-ready product
@@ -92,7 +93,7 @@ committed to the repository (see §3).
 
 | Concern        | Source (V1)                       | Notes                                  |
 |----------------|-----------------------------------|----------------------------------------|
-| Daily prices   | Stooq                             | Behind `PriceProvider`; replaceable (ADR 0008) |
+| Daily prices   | Stooq (dev) / Tiingo (recommended) | Behind `DailyPriceProvider`; Stooq is anti-bot blocked, Tiingo recommended for real ingestion (ADR 0008, 0022) |
 | Fundamentals   | SEC EDGAR CompanyFacts API        | Public domain; carries `filed_date` / `accession_no` |
 | Factor returns | Ken French data library (daily)   | Mkt-RF, SMB, HML, **RF** (ADR 0009); usage terms - not redistributed |
 | Security list  | SEC `company_tickers_exchange`    | Seeds the searchable universe          |
@@ -113,18 +114,19 @@ Locked in [ADR 0015](./decisions/0015-no-redistributed-vendor-data.md).
   for fetching external data into a local database.
 * **Demo reproducibility = reproducible ingestion + methodology.** The six demo
   securities (NVDA, AMD, INTC, AAPL, MSFT, SPY) are populated by
-  `just ingest-demo` (a Phase 1 command), which calls the provider. Search still
-  covers the broader universe seeded from the SEC ticker file.
+  `just ingest-demo` (a Phase 1D command), which calls the provider. Search
+  still covers the broader universe seeded from the SEC ticker file (Phase 1B).
 * The market-data provider is **replaceable**. Vendor quirks live only in the
-  `PriceProvider` implementation; no analytics code encodes a provider-specific
-  assumption.
-* **Phase 1 corporate-action / adjusted-price spot-check.** For the demo
-  securities, ingestion is validated against a small hand-authored
-  expected-behaviour fixture, explicitly covering **NVDA's 10-for-1 split
-  (ex-date 2024-06-10)**: the adjusted-close series must show no ~10x
-  discontinuity across the split, pre-split bars must be back-adjusted
-  consistently, and a few manually transcribed reference points must match
-  within tolerance. The fixture is hand-written; it is not a vendor extract.
+  `DailyPriceProvider` implementation; no analytics code encodes a
+  provider-specific assumption.
+* **Corporate-action / adjusted-price spot-check (Phase 1C).** Provider output
+  is checked against a small hand-authored expected-behaviour fixture, covering
+  **NVDA's 10-for-1 split (ex-date 2024-06-10)**: the adjusted-close series must
+  show no ~10x discontinuity across the split, and a few manually transcribed
+  reference points must sit within tolerance of publicly-known post-split
+  levels. The fixture is hand-written; it is not a vendor extract. It is a
+  coarse "obviously broken?" check, not proof the vendor adjusted close is
+  authoritative.
 
 ---
 
@@ -190,16 +192,18 @@ src/quantscope/
 ├── logging_setup.py       structured JSON-line logging for CLI jobs
 ├── data/
 │   ├── providers/
-│   │   ├── base.py         SecurityReferenceProvider (+ Price/Fundamentals/Factor later)
+│   │   ├── base.py         SecurityReferenceProvider, DailyPriceProvider (+ Fundamentals/Factor later)
 │   │   ├── sec_edgar.py    company_tickers_exchange parse + provider
-│   │   ├── stooq.py
+│   │   ├── stooq.py        daily price CSV parse + provider (ADR 0022)
 │   │   └── fama_french.py
 │   ├── reference.py        SEC-label -> exchange-code map (listed-only in V1),
 │   │                       CIK/ticker normalisation, curated-only asset-type
 │   ├── security_seed.py    fetch -> normalise -> upsert -> record run
+│   ├── prices.py           RawPriceBar -> canonical price frame + drop reasons
+│   ├── validation.py       Pandera PRICE_BAR_SCHEMA + validate_price_bars()
+│   ├── spot_checks.py      NVDA split adjusted-close sanity check
 │   ├── canonical_metrics.py  ordered US-GAAP tag lists per displayed metric
-│   ├── validation.py       Pandera schema + sanity rules + demo spot-checks
-│   └── ingest.py           fetch -> validate -> normalise -> upsert
+│   └── ingest.py           fetch -> validate -> normalise -> upsert (persistence, Phase 1D)
 ├── db/
 │   ├── base.py             DeclarativeBase (+ constraint naming convention)
 │   ├── session.py          engine + sessionmaker + get_session dependency
@@ -207,7 +211,7 @@ src/quantscope/
 │   │                       fundamental_fact, data_ingestion_run
 │   └── repositories/       securities.upsert_securities (+ more per aggregate)
 └── jobs/
-    └── cli.py              seed-securities, ingest-prices, ingest-demo ...
+    └── cli.py              seed-securities (1B); ingest-demo (1D) ...
 ```
 
 Packages for portfolio, backtesting, filings, AI and auth are **not created**
@@ -384,26 +388,39 @@ Monorepo layout; `docker-compose` (db + backend + frontend); `uv` / `pnpm`
 tooling; `justfile`; Ruff, mypy (strict on `quant`), pytest, `import-linter`
 contract; GitHub Actions CI; pre-commit; Alembic wired with **no migration
 yet**; FastAPI app factory + `/health`; Next.js shell with the TanStack Query
-provider; `.env.example`; README; `docs/architecture.md` + ADRs 0001-0021.
+provider; `.env.example`; README; `docs/architecture.md` + ADRs 0001-0022.
 
 ### Phase 1 - Search + market-data ingestion
-Delivered in sub-phases:
-- **1A** *(done)* - ORM models + migration `0001` (`security`, `price_bar`,
+Delivered in sub-phases 1A-1F. Each is reviewed and approved before the next
+begins; no sub-phase pulls work forward from a later one.
+
+- **1A** *(complete)* - ORM models + migration `0001` (`security`, `price_bar`,
   `data_ingestion_run`, `pg_trgm`); model/constraint tests against PostgreSQL.
-- **1B** *(in review)* - security-universe seeding from SEC
+- **1B** *(complete)* - SEC security-universe seeding from
   `company_tickers_exchange.json`: source adapter, exchange-label normalisation
   (exchange-listed only; OTC excluded), CIK/ticker normalisation, curated-only
   asset-type classification, idempotent upsert, `quantscope seed-securities` CLI
   + `just seed`, structured logging, `data_ingestion_run` recording. Migration
   `0002` (`asset_type` nullable).
-- **1C** - `PriceProvider` Protocol + Stooq implementation (cassette tests);
-  Pandera validation + sanity rules; **demo corporate-action / adjusted-price
-  spot-check (NVDA 10:1 split)**; `data/ingest.py`; `just ingest-demo`;
-  endpoints `GET /securities`, `GET /securities/{ticker}`,
-  `GET /securities/{ticker}/prices`. Frontend: search -> ticker page + price
-  chart.
+- **1C** *(in review)* - `DailyPriceProvider` Protocol + `RawPriceBar`; **one**
+  provider implementation (Stooq adapter - synthetic-fixture tests only, live
+  fetch is anti-bot blocked, ADR 0022); `normalize_price_bars` -> canonical
+  typed price-bar frame; `PRICE_BAR_SCHEMA` (Pandera) + `validate_price_bars`
+  with **structured validation / drop reasons**; hand-authored **NVDA 10:1
+  split adjusted-price spot-check**. **No database persistence, no price APIs,
+  no frontend.**
+- **1D** - validated price-bar persistence into `price_bar`; `data/ingest.py`
+  orchestration with `data_ingestion_run` integration; `just ingest-demo` for
+  the demo tickers. (Needs a working provider - Tiingo recommended, ADR 0022.)
+- **1E** - REST endpoints `GET /securities`, `GET /securities/{ticker}`,
+  `GET /securities/{ticker}/prices` (service layer + Pydantic schemas +
+  OpenAPI).
+- **1F** - frontend: security search, ticker page, and price chart
+  (`lightweight-charts`), wired through TanStack Query.
 
-No committed datasets - fetch instructions + synthetic fixtures only.
+No committed datasets - vendor data is never committed to the repository; tests
+use synthetic / hand-authored fixtures and documented local-fetch instructions
+(ADR 0015).
 
 ### Phase 2 - Deterministic single-name analytics
 `quant/conventions`, `quant/returns|risk|drawdown|performance` with
@@ -441,7 +458,7 @@ AI evaluation harness.
 | API contract      | `assumptions` block in every analytics response     | 0005 |
 | Market scope      | US equities, XNYS calendar only                     | 0006 |
 | Infrastructure    | No Redis / queue / workers / auth in V1             | 0007 |
-| Price provider    | Stooq (behind the Protocol)                         | 0008 |
+| Price provider    | Stooq behind the Protocol; anti-bot blocked live -> Tiingo for real ingestion | 0008, 0022 |
 | Factor data       | Daily Fama-French; schema allows monthly            | 0009 |
 | Frontend data     | TanStack Query                                      | 0010 |
 | Identity          | `security_id` is the universal FK                   | 0011 |
@@ -455,3 +472,4 @@ AI evaluation harness.
 | Product priorities | Correctness > architecture > dashboard > setup > methodology > breadth | 0019 |
 | Task runner       | Thin cross-platform `justfile`; README keeps raw commands | 0020 |
 | Security seeding  | SEC reference data; label-derived exchange codes; exchange-listed only (OTC excluded); nullable asset_type; idempotent upsert | 0021 |
+| Price data layer  | Provider Protocol + `RawPriceBar`; pandas normalisation; Pandera `PRICE_BAR_SCHEMA`; NVDA split spot-check | 0022 |

@@ -4,10 +4,12 @@ A quantitative equity research platform: search a US equity, ingest and store
 its market data, and compute deterministic performance, risk and factor
 analytics behind a polished research dashboard.
 
-> **Status: Phase 0 (scaffold).** No feature functionality yet. This milestone
-> establishes the repository structure, tooling, CI and a running skeleton.
-> See [`docs/architecture.md`](docs/architecture.md) for the full plan and
-> [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0020).
+> **Status: Phase 1 (search + market-data ingestion), in sub-phases.**
+> 1A (DB models/migration) and 1B (SEC security-universe seeding) are complete;
+> 1C (price provider + normalisation + validation + NVDA split spot-check) is in
+> review. No price persistence, price APIs or frontend features yet.
+> See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
+> [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
 
 ---
 
@@ -69,7 +71,7 @@ below and remains the source of truth.
 | `just check`             | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
 | `just compose-config`    | `docker compose config` (no daemon needed)                  |
 
-`just ingest-demo` (price data for the demo tickers) is added in Phase 1C, once
+`just ingest-demo` (price data for the demo tickers) is added in Phase 1D, once
 that CLI command exists.
 
 ---
