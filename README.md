@@ -5,9 +5,10 @@ its market data, and compute deterministic performance, risk and factor
 analytics behind a polished research dashboard.
 
 > **Status: Phase 1 (search + market-data ingestion), in sub-phases.**
-> 1A (DB models/migration) and 1B (SEC security-universe seeding) are complete;
-> 1C (price provider + normalisation + validation + NVDA split spot-check) is in
-> review. No price persistence, price APIs or frontend features yet.
+> 1A (DB models/migration), 1B (SEC security-universe seeding) and 1C
+> (price-provider contract + normalisation + Pandera validation + NVDA split
+> spot-check) are complete; 1C.1 (Tiingo adapter, ADR 0022) is in review.
+> No price persistence, price APIs or frontend features yet.
 > See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
 > [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
 
@@ -171,6 +172,30 @@ rejected with reason `unsupported_exchange_v1:OTC`. `security.exchange` is a
 MIC-style code **normalised from the single SEC exchange label**; it is not
 cross-verified listing-venue metadata and may differ from a security's true
 primary listing (e.g. SEC labels `SPY` "NYSE").
+
+### Daily-price provider: Tiingo (Phase 1C)
+
+Tiingo is QuantScope's V1 live daily-price provider (ADR 0022). A **free** token
+is required for any live fetch; **never commit it**.
+
+1. Sign up at <https://www.tiingo.com> (free) and copy your token from
+   <https://www.tiingo.com/account/api/token>.
+2. `export QUANTSCOPE_TIINGO_TOKEN=<your token>` (or put it in `.env`).
+
+Tiingo returns raw OHLCV **and** a CRSP split-and-dividend–adjusted close
+(`adjClose` → our `adj_close`), plus `divCash` / `splitFactor`. The adapter maps
+its JSON into the existing `RawPriceBar` → `normalize_price_bars` → Pandera
+validation pipeline unchanged. Fetched observations are for internal/local use
+only and are never committed or redistributed (ADR 0015). Free-tier limits (as
+of 2026-08-31): 50 req/hr, 1000 req/day, 500 symbols/month, 1 GB/month.
+
+The **Stooq** adapter (`quantscope.data.providers.stooq`) is retained as a
+second `DailyPriceProvider` implementation and offline CSV parser; its live
+endpoint is anti-bot gated and cannot be used for automated ingestion (ADR 0022).
+
+Phase 1C.1 adds only the adapter and its tests - **no persistence, no CLI, no
+APIs** (those are Phase 1D–1E). Guarded live smoke tests in
+`backend/tests/integration/live/` run only when `QUANTSCOPE_TIINGO_TOKEN` is set.
 
 ### Frontend
 

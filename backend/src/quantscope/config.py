@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://quantscope:quantscope@localhost:5432/quantscope"
 
     # Market-data configuration (consumed from Phase 1 onward).
-    price_provider: str = "stooq"
+    price_provider: str = "tiingo"  # V1 live provider (ADR 0022)
     default_benchmark_ticker: str = "SPY"
 
     # SEC EDGAR. SEC's access policy requires a User-Agent identifying the caller
@@ -34,7 +34,13 @@ class Settings(BaseSettings):
     sec_user_agent: str = "QuantScope/0.1 (set QUANTSCOPE_SEC_USER_AGENT)"
     sec_company_tickers_url: str = "https://www.sec.gov/files/company_tickers_exchange.json"
 
-    # Stooq daily price CSV endpoint (Phase 1C dev provider; see ADR 0022).
+    # Tiingo - V1 live daily-price provider (ADR 0022). The token is required for
+    # any live fetch; it must never be committed. Free token: https://www.tiingo.com
+    tiingo_api_token: str = ""
+    tiingo_base_url: str = "https://api.tiingo.com"
+
+    # Stooq daily price CSV endpoint. Retained as a second DailyPriceProvider
+    # implementation / offline parser; its live endpoint is anti-bot gated (ADR 0022).
     stooq_base_url: str = "https://stooq.com/q/d/l/"
 
     # CORS origins allowed to call the API (the Next.js dev server by default).

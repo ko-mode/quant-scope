@@ -30,4 +30,4 @@ Superseding a decision means adding a new ADR and marking the old one
 | 0019 | Product priorities (CV project)                     | Accepted |
 | 0020 | Thin cross-platform task runner (`justfile`)        | Accepted |
 | 0021 | Security-universe seeding from SEC reference data   | Accepted |
-| 0022 | Price provider: Stooq reassessed; Tiingo recommended for real ingestion | Accepted (amends 0008) |
+| 0022 | Price provider: Tiingo adopted as V1 live provider  | Accepted (amends 0008) |

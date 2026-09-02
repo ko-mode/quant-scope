@@ -3,7 +3,7 @@
 **Status:** approved for implementation (MVP scope = Phases 0-3)
 **Last updated:** 2026-08-30 - Phase 0 review (provenance, fundamentals mapping,
 quant conventions, dependency contract, DataFrame contracts, product priorities,
-task runner); Phase 1A-1C in progress (ADRs 0021-0022; Phase 1 split into
+task runner); Phase 1A-1C.1 in progress (ADRs 0021-0022; Phase 1 split into
 sub-phases 1A-1F)
 
 QuantScope is a quantitative equity research platform. This document describes
@@ -82,7 +82,7 @@ primary audience is a technical hiring manager evaluating a CV project:
                         +---------------+
 
    Ingestion (CLI / scheduled job, NOT in the request path):
-     provider (Stooq / SEC EDGAR / Ken French)
+     provider (Tiingo prices / SEC EDGAR / Ken French)
        -> validation (Pandera schema + sanity rules)
        -> normalisation (XNYS calendar; vendor-adjusted close; spot-checks)
        -> repository upsert -> PostgreSQL
@@ -93,7 +93,7 @@ committed to the repository (see §3).
 
 | Concern        | Source (V1)                       | Notes                                  |
 |----------------|-----------------------------------|----------------------------------------|
-| Daily prices   | Stooq (dev) / Tiingo (recommended) | Behind `DailyPriceProvider`; Stooq is anti-bot blocked, Tiingo recommended for real ingestion (ADR 0008, 0022) |
+| Daily prices   | **Tiingo** (Stooq retained)       | V1 live provider; raw close + CRSP split&dividend `adjClose`; free token. Stooq adapter kept but anti-bot blocked (ADR 0008, 0022) |
 | Fundamentals   | SEC EDGAR CompanyFacts API        | Public domain; carries `filed_date` / `accession_no` |
 | Factor returns | Ken French data library (daily)   | Mkt-RF, SMB, HML, **RF** (ADR 0009); usage terms - not redistributed |
 | Security list  | SEC `company_tickers_exchange`    | Seeds the searchable universe          |
@@ -194,14 +194,15 @@ src/quantscope/
 │   ├── providers/
 │   │   ├── base.py         SecurityReferenceProvider, DailyPriceProvider (+ Fundamentals/Factor later)
 │   │   ├── sec_edgar.py    company_tickers_exchange parse + provider
-│   │   ├── stooq.py        daily price CSV parse + provider (ADR 0022)
+│   │   ├── tiingo.py       Tiingo EOD JSON parse + provider - V1 live (ADR 0022)
+│   │   ├── stooq.py        daily price CSV parse + provider - retained, blocked (ADR 0022)
 │   │   └── fama_french.py
 │   ├── reference.py        SEC-label -> exchange-code map (listed-only in V1),
 │   │                       CIK/ticker normalisation, curated-only asset-type
 │   ├── security_seed.py    fetch -> normalise -> upsert -> record run
 │   ├── prices.py           RawPriceBar -> canonical price frame + drop reasons
 │   ├── validation.py       Pandera PRICE_BAR_SCHEMA + validate_price_bars()
-│   ├── spot_checks.py      NVDA split adjusted-close sanity check
+│   ├── spot_checks.py      NVDA split + dividend-back-adjustment checks
 │   ├── canonical_metrics.py  ordered US-GAAP tag lists per displayed metric
 │   └── ingest.py           fetch -> validate -> normalise -> upsert (persistence, Phase 1D)
 ├── db/
@@ -402,16 +403,20 @@ begins; no sub-phase pulls work forward from a later one.
   asset-type classification, idempotent upsert, `quantscope seed-securities` CLI
   + `just seed`, structured logging, `data_ingestion_run` recording. Migration
   `0002` (`asset_type` nullable).
-- **1C** *(in review)* - `DailyPriceProvider` Protocol + `RawPriceBar`; **one**
-  provider implementation (Stooq adapter - synthetic-fixture tests only, live
-  fetch is anti-bot blocked, ADR 0022); `normalize_price_bars` -> canonical
-  typed price-bar frame; `PRICE_BAR_SCHEMA` (Pandera) + `validate_price_bars`
-  with **structured validation / drop reasons**; hand-authored **NVDA 10:1
-  split adjusted-price spot-check**. **No database persistence, no price APIs,
-  no frontend.**
+- **1C** *(complete)* - `DailyPriceProvider` Protocol + `RawPriceBar`;
+  `normalize_price_bars` -> canonical typed price-bar frame; `PRICE_BAR_SCHEMA`
+  (Pandera) + `validate_price_bars` with **structured validation / drop
+  reasons**; hand-authored **NVDA 10:1 split adjusted-price spot-check**; Stooq
+  adapter (synthetic fixtures; live fetch anti-bot blocked). **No persistence,
+  APIs, or frontend.**
+- **1C.1** *(in review)* - **Tiingo adapter** adopted as the V1 live provider
+  (ADR 0022): `TiingoDailyPriceProvider` + pure `parse_tiingo_eod`, config +
+  `QUANTSCOPE_TIINGO_TOKEN`, error mapping, synthetic-fixture tests, guarded
+  live smoke tests, live NVDA split + dividend-back-adjustment spot-checks.
+  Stooq adapter retained. **Still no persistence.**
 - **1D** - validated price-bar persistence into `price_bar`; `data/ingest.py`
   orchestration with `data_ingestion_run` integration; `just ingest-demo` for
-  the demo tickers. (Needs a working provider - Tiingo recommended, ADR 0022.)
+  the demo tickers (uses Tiingo).
 - **1E** - REST endpoints `GET /securities`, `GET /securities/{ticker}`,
   `GET /securities/{ticker}/prices` (service layer + Pydantic schemas +
   OpenAPI).
@@ -458,7 +463,7 @@ AI evaluation harness.
 | API contract      | `assumptions` block in every analytics response     | 0005 |
 | Market scope      | US equities, XNYS calendar only                     | 0006 |
 | Infrastructure    | No Redis / queue / workers / auth in V1             | 0007 |
-| Price provider    | Stooq behind the Protocol; anti-bot blocked live -> Tiingo for real ingestion | 0008, 0022 |
+| Price provider    | **Tiingo adopted** as V1 live provider; Stooq adapter retained (anti-bot blocked) | 0008, 0022 |
 | Factor data       | Daily Fama-French; schema allows monthly            | 0009 |
 | Frontend data     | TanStack Query                                      | 0010 |
 | Identity          | `security_id` is the universal FK                   | 0011 |

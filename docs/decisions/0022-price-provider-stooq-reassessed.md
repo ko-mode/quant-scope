@@ -1,66 +1,141 @@
-# 22. Price provider: Stooq reassessed; Tiingo recommended for real ingestion
+# 22. Price provider: Tiingo adopted as V1 live provider
 
 - **Status:** Accepted
-- **Date:** 2026-08-30
+- **Date:** 2026-08-30 (Tiingo adopted 2026-08-31 after the provider review;
+  live-verified 2026-09-02)
 - **Amends:** ADR 0008 (Stooq as initial price provider)
 
 ## Context
 
-ADR 0008 chose Stooq as the first `PriceProvider` (tokenless, CSV over HTTP).
-Phase 1C reassessed Stooq before implementing the adapter, as ADR 0008 itself
-flagged concerns about adjusted-close semantics and reliability.
+ADR 0008 chose Stooq. Phase 1C reassessed it before implementing the adapter,
+found Stooq unusable for automated ingestion, and (2026-08-31) a dedicated
+market-data provider review compared realistic free-tier alternatives (Tiingo,
+Twelve Data, Alpha Vantage, EODHD, Polygon, yfinance). **Tiingo is adopted as
+QuantScope's V1 live daily-price provider.**
 
 ## Findings
 
-1. **Anti-bot gating (verified 2026-08-30).** Every Stooq data URL
-   (`stooq.com/q/d/l/`, `stooq.pl/...`, the light-quote endpoints) responds
-   `HTTP 200` with a JavaScript proof-of-work *"This site requires JavaScript to
-   verify your browser"* challenge page - **not CSV**. A plain HTTP client
-   cannot retrieve data. Confirmed with `curl` and `httpx` for `NVDA` and `SPY`.
-2. **Single, ambiguous `Close`.** Stooq's daily CSV has one `Close` column and
-   no separate raw/unadjusted price; its adjustment rule (split-only vs
-   split+dividend) is undocumented. Mapping it to both `close` and `adj_close`
-   makes ADR 0012's "recompute adjustment from stored raw close" impossible with
-   Stooq data.
-3. **Rate limits.** Historically ~50-100 requests/day per IP, then a
-   `"Exceeded the daily hits limit"` body.
-4. **Redistribution.** Stooq's terms forbid redistribution - consistent with
-   ADR 0015, but it means tests use **synthetic hand-authored** fixtures, not
-   recorded cassettes (this supersedes ADR 0008's "recorded cassettes" plan).
+### Stooq (incumbent) - unusable for automated ingestion
+
+1. **Anti-bot gating (verified 2026-08-30).** Every Stooq data URL responds
+   `HTTP 200` with a JavaScript proof-of-work *"verify your browser"* challenge
+   page - not CSV. A plain HTTP client cannot retrieve data. Confirmed with
+   `curl` and `httpx` for `NVDA` and `SPY`.
+2. **Single, ambiguous `Close`.** One column, no separate raw/adjusted, no
+   documented adjustment rule.
+3. Historically ~50-100 requests/day per IP.
+4. Terms forbid redistribution.
+
+### Tiingo - adopted
+
+- **History:** US equities to 1962; **30+ years on the free tier**.
+- **Fields:** raw `open/high/low/close/volume` **and** `adjClose` (+
+  `adjOpen/High/Low/Volume`), plus `divCash` and `splitFactor` per row.
+- **Adjusted-close semantics (from Tiingo's End-of-Day docs):** the adjustment
+  "follows the standard method set forth by 'The Center for Research in Security
+  Prices' (CRSP)… incorporates **both split and dividend adjustments**." A CRSP
+  split-and-dividend back-adjusted close is a total-return series by
+  construction, so `adjClose.pct_change()` is total return - **compatible with
+  ADR 0012**. Raw `close` is retained separately, so ADR 0012's future
+  self-computed reconstruction path stays open.
+- **Auth:** one API token (`Authorization: Token <token>` header).
+- **Free tier (checked 2026-08-31; time-sensitive):** 50 req/hour, 1000 req/day,
+  500 unique symbols/month, 1 GB/month bandwidth; EOD prices + corporate actions
+  included; email sign-up.
+- **Demo universe:** NVDA, AMD, INTC, AAPL, MSFT and **SPY** all covered with
+  full history. Plain-ticker symbols (dashes for share classes) - no mapping
+  needed for the demo set.
+- **Usage terms:** *"For Basic and Power accounts, data is for internal and
+  personal use only. You may not redistribute the data in any form."* Storing
+  fetched observations in the developer's **local** PostgreSQL is internal use
+  and is **compatible**. Committing or publishing datasets is redistribution and
+  is **prohibited** - exactly ADR 0015's posture; no ADR 0015 change.
+- **Contract fit:** Tiingo JSON → adapter → `RawPriceBar` → the *existing*
+  `normalize_price_bars` → the *existing* Pandera `PRICE_BAR_SCHEMA`. **No
+  change to the provider-independent contract.** (`date`'s `T…Z` suffix is
+  trimmed to a date string inside the adapter; `divCash`/`splitFactor` are not
+  part of `RawPriceBar` and are dropped there.)
+
+### Live verification (2026-09-02)
+
+The guarded live suite (`tests/integration/live/`, run once with a free token)
+confirmed the adoption empirically:
+
+- **Dividend adjustment - confirmed.** On the AAPL ex-dividend session of
+  **2024-05-10**, Tiingo reported `divCash = 0.25`; the
+  `verify_dividend_back_adjustment` check independently implied a dividend of
+  **~0.2500** from the raw vs. adjusted closes (adjusted return across the
+  ex-date -0.688% vs. raw price return -0.824%). This empirically confirms that
+  Tiingo `adjClose` incorporates dividend adjustment and is therefore suitable
+  for the total-return analytics assumed by ADR 0012.
+- **NVDA 10:1 split - confirmed.** The June 2024 split spot-check passed:
+  `adj_close` is continuous across the 2024-06-10 ex-date (ratio ~0.99, no ~10x
+  discontinuity), all reference points within tolerance.
+- **Demo universe - fetched, normalised, validated.** All six demo tickers
+  (NVDA, AMD, INTC, AAPL, MSFT, SPY) fetched ~10 years of history
+  (2015-01-02 .. 2025-01-31), each yielding 2,536 bars that passed
+  `normalize_price_bars` and the Pandera `PRICE_BAR_SCHEMA` with zero drops.
+
+### Alternatives rejected
+
+- **Twelve Data** (800 req/day free) - daily prices are **split-adjusted only**;
+  dividend adjustment must be built from `/splits` + `/dividends`. Not a
+  total-return series out of the box.
+- **Polygon.io** - split-adjusted only; **no dividend adjustment**.
+- **Alpha Vantage** - `TIME_SERIES_DAILY_ADJUSTED` is **premium-only**; the free
+  tier gives raw OHLCV only and 25 req/day.
+- **EODHD** - free plan capped at **~1 year of history**.
+- **yfinance / Yahoo** - `Adj Close` semantics are fine, but it is an unofficial
+  scrape being actively rate-limited/blocked in 2025-26; same failure class as
+  Stooq. Rejected by ADR 0008 and still unsuitable.
 
 ## Decision
 
-* **Implement the Stooq adapter for Phase 1C** behind the `DailyPriceProvider`
-  Protocol. Phase 1C's real deliverable is the provider contract + the
-  normalisation / Pandera-validation / spot-check layers, all provider-agnostic;
-  the adapter exercises the contract.
-* The adapter **detects the browser-verification challenge and raises
-  `PriceProviderBlockedError`**. It is fully unit-tested with synthetic CSV, but
-  **cannot be verified against a live Stooq response** while the gating stands.
-  The NVDA split spot-check therefore runs against a hand-authored fixture only.
-* **Recommend Tiingo as the price provider from Phase 1D**: free token
-  (email sign-up), JSON with `close` **and** `adjClose` (plus `adjOpen/High/Low`,
-  `divCash`, `splitFactor`), documented semantics, ~1000 req/day. It satisfies
-  ADR 0012 (real raw + adjusted) and drops in behind the unchanged Protocol.
-* ADR 0008 is amended: Stooq is no longer the assumed source for real ingestion,
-  and test doubles are synthetic fixtures, not cassettes.
+1. **Adopt Tiingo as the V1 live daily-price provider.** `price_provider`
+   default is `tiingo`; `QUANTSCOPE_TIINGO_TOKEN` and `QUANTSCOPE_TIINGO_BASE_URL`
+   configure it. A missing token raises `PriceProviderConfigError` at
+   construction with instructions, not a later HTTP/parse failure.
+2. **`TiingoDailyPriceProvider`** implements `DailyPriceProvider`; a pure
+   `parse_tiingo_eod(...)` handles JSON→`RawPriceBar` mapping and is tested
+   without HTTP. HTTP failures map into the provider error hierarchy:
+   config/auth (`PriceProviderConfigError` / `PriceProviderAuthError`, both new
+   `PriceProviderError` subclasses), 404 → `PriceDataUnavailableError`, 429 →
+   `PriceProviderRateLimitedError`, empty result → `PriceDataUnavailableError`,
+   non-JSON / network failure → `PriceProviderError`. httpx exceptions never
+   leak past the adapter.
+3. **Keep the Stooq adapter** as (a) evidence `DailyPriceProvider` supports
+   multiple implementations, (b) an offline CSV parser, (c) the documented
+   reason provider replaceability matters. It remains anti-bot blocked for
+   automated live use.
+4. **Tests use synthetic hand-authored fixtures only** (this supersedes ADR
+   0008's "recorded cassettes"). No fetched Tiingo data is committed (ADR 0015).
+5. **Empirical corporate-action checks** (Phase 1C.1):
+   - `check_nvda_split_adjustment` against the NVDA 10:1 split (2024-06-10).
+   - `verify_dividend_back_adjustment` - provider-independent arithmetic on
+     `close`, `adjClose`, `divCash`, `splitFactor` around an ex-dividend date.
+     It backs the dividend out of the adjustment and checks it matches the
+     reported `divCash`, distinguishing a dividend-adjusted (total-return)
+     series from a split-only one.
+   Both run live in `tests/integration/live/` when `QUANTSCOPE_TIINGO_TOKEN` is
+   set; a synthetic unit test proves the dividend-check logic either way.
 
 ## Consequences
 
-* Phase 1C is complete and provider-independent: `DailyPriceProvider`,
-  `RawPriceBar`, `normalize_price_bars`, `PRICE_BAR_SCHEMA` / `validate_price_bars`,
-  `check_nvda_split_adjustment`.
-* **No live price data flows** until Phase 1D wires a working provider (Tiingo,
-  or a JS-capable Stooq fetch path). This is a known gap, not a silent one.
-* If Stooq ever is the source, every `price_bar` would have `close == adj_close`
-  and ADR 0012's reconstruction path stays closed until a raw-close source
-  (Tiingo) is used.
+* Phase 1C.1 is provider-adapter only - **no persistence, CLI, or APIs** (Phase
+  1D-1E).
+* `adj_close` continues to be the total-return series for analytics; this now
+  rests on Tiingo's documented CRSP methodology plus an empirical check, not an
+  assumption from a field name.
+* Reproducibility for a fresh clone: free Tiingo signup → one token → one env
+  var → guarded tests / (later) `just ingest-demo`.
 
-## Alternatives considered
+## What is documentation vs. empirical vs. assumption
 
-* **yfinance** - rejected in ADR 0008 (unofficial, fragile, adjustment bugs);
-  still not a system of record. Possible dev-only fallback.
-* **Alpha Vantage** - 25 requests/day on the free tier; unusable for iteration.
-* **Keep waiting on Stooq** - rejected: the gating is not under our control.
-* **Headless-browser fetch for Stooq** - rejected: disproportionate infra for a
-  dev data source when Tiingo solves it with a token.
+| Claim | Basis |
+|---|---|
+| Tiingo `adjClose` uses CRSP split **+ dividend** adjustment | Tiingo End-of-Day documentation (quoted above) |
+| `adjClose.pct_change()` is a total-return series | follows mathematically from CRSP dividend back-adjustment; **confirmed empirically 2026-09-02** - the live `verify_dividend_back_adjustment` check on the AAPL 2024-05-10 ex-dividend session observed `divCash = 0.25` and independently implied a dividend of ~0.2500 from the raw/adjusted closes (see "Live verification" above) |
+| Free-tier limits (50/hr, 1000/day, 500 sym/mo, 1 GB/mo) | Tiingo pricing page, **checked 2026-08-31**; time-sensitive, re-verify |
+| Local DB storage is permitted; redistribution is not | Tiingo API overview "internal and personal use only… may not redistribute" |
+| Dividend-adjustment factor is exactly `1 − dividend/close` | third-party docs mirror only; **not** verbatim-confirmed from a live Tiingo page - the empirical check does not depend on the exact factor |
+| Credit card not required for the free tier | widely reported; not restated on the pricing page fetched |

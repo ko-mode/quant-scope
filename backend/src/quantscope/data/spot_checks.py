@@ -1,7 +1,14 @@
-"""Coarse corporate-action sanity checks on a normalised price frame.
+"""Coarse corporate-action sanity checks.
 
-Phase 1C ships one: the **NVDA 10-for-1 split, ex-date 2024-06-10** (ADR 0012,
-0015, 0022).
+* :func:`check_nvda_split_adjustment` - runs on a **normalised price frame** and
+  checks the NVDA 10-for-1 split (ex-date 2024-06-10) shows no ~10x
+  discontinuity in ``adj_close``.
+* :func:`verify_dividend_back_adjustment` - pure arithmetic on six numbers taken
+  from *any* provider's raw payload (raw close, adjusted close, divCash,
+  splitFactor); checks whether the adjusted series incorporates a dividend, i.e.
+  whether ``adj_close.pct_change()`` is a total-return series (ADR 0012, 0022).
+
+Both are provider-independent (ADR 0022, Phase 1C).
 
 What ``check_nvda_split_adjustment`` proves
 -----------------------------------------
@@ -120,9 +127,129 @@ def check_nvda_split_adjustment(frame: pd.DataFrame) -> SpotCheckResult:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Dividend back-adjustment semantics (provider-independent, ADR 0022)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class DividendCheckResult:
+    name: str
+    passed: bool
+    dividend_incorporated: bool
+    reported_dividend: float
+    implied_dividend: float
+    adj_total_return: float
+    raw_price_return: float
+    observations: tuple[str, ...]
+
+
+def verify_dividend_back_adjustment(
+    *,
+    close_before: float,
+    close_ex: float,
+    adj_close_before: float,
+    adj_close_ex: float,
+    dividend: float,
+    split_factor_ex: float = 1.0,
+    abs_tol: float | None = None,
+) -> DividendCheckResult:
+    """Check whether an adjusted series folds a dividend back into prices.
+
+    Inputs are the raw and adjusted closes on the last session **before** an
+    ex-dividend date and on the ex-date session, the cash dividend on that
+    ex-date, and its split factor. All values are as the provider reported them;
+    the check verifies an *economic relationship*, not copied numbers.
+
+    For a CRSP-style dividend back-adjustment with no split in the step, holding
+    across the ex-date returns ``(close_ex + dividend) / close_before``, so the
+    adjusted series should satisfy
+    ``adj_close_ex / adj_close_before == (close_ex + dividend) / close_before``.
+    Rearranged, the dividend *implied* by the adjustment is
+    ``close_before * (adj_close_ex / adj_close_before) - close_ex``; it should
+    match the reported ``divCash``. If instead the adjusted return equals the raw
+    price return (implied dividend ~ 0), the series is split-only and
+    ``adj_close.pct_change()`` would understate total return.
+    """
+    obs: list[str] = []
+    name = "dividend_back_adjustment"
+
+    def _fail(reason: str, *, incorporated: bool = False) -> DividendCheckResult:
+        return DividendCheckResult(
+            name,
+            False,
+            incorporated,
+            float(dividend),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            (reason,),
+        )
+
+    for label, value in (
+        ("close_before", close_before),
+        ("close_ex", close_ex),
+        ("adj_close_before", adj_close_before),
+        ("adj_close_ex", adj_close_ex),
+    ):
+        if not value > 0:
+            return _fail(f"{label} is not positive ({value!r})")
+    if abs(split_factor_ex - 1.0) > 1e-9:
+        return _fail(
+            f"step contains a split (splitFactor={split_factor_ex}); choose a split-free ex-dividend date"
+        )
+    if not dividend > 0:
+        return _fail(f"reported dividend is not positive ({dividend!r}); not an ex-dividend step")
+
+    adj_total_return = adj_close_ex / adj_close_before - 1.0
+    raw_price_return = close_ex / close_before - 1.0
+    implied_dividend = close_before * (adj_close_ex / adj_close_before) - close_ex
+
+    tol = abs_tol if abs_tol is not None else max(0.01, 0.10 * dividend)
+    matches_reported = abs(implied_dividend - dividend) <= tol
+    is_nonzero = implied_dividend > tol
+
+    dividend_incorporated = bool(matches_reported and is_nonzero)
+
+    obs.append(f"adj total return across ex-date: {adj_total_return * 100:+.4f}%")
+    obs.append(f"raw price return across ex-date: {raw_price_return * 100:+.4f}%")
+    obs.append(
+        f"dividend implied by adjustment: {implied_dividend:.4f}  "
+        f"(reported divCash {dividend:.4f}, tolerance +/-{tol:.4f})"
+    )
+    if dividend_incorporated:
+        obs.append(
+            "adjusted series incorporates the dividend -> adj_close.pct_change() is a "
+            "TOTAL-RETURN series (compatible with ADR 0012)"
+        )
+    elif is_nonzero:
+        obs.append(
+            "adjusted series moves across the ex-date but the implied dividend does not "
+            "match divCash -> adjustment semantics UNCLEAR"
+        )
+    else:
+        obs.append(
+            "adjusted return == raw price return -> dividend NOT incorporated (split-only). "
+            "adj_close.pct_change() would UNDERSTATE total return -- CONTRADICTS ADR 0012."
+        )
+
+    return DividendCheckResult(
+        name=name,
+        passed=dividend_incorporated,
+        dividend_incorporated=dividend_incorporated,
+        reported_dividend=float(dividend),
+        implied_dividend=float(implied_dividend),
+        adj_total_return=float(adj_total_return),
+        raw_price_return=float(raw_price_return),
+        observations=tuple(obs),
+    )
+
+
 __all__ = [
     "NVDA_SPLIT_EX_DATE",
     "NVDA_SPLIT_RATIO",
+    "DividendCheckResult",
     "SpotCheckResult",
     "check_nvda_split_adjustment",
+    "verify_dividend_back_adjustment",
 ]

@@ -88,6 +88,14 @@ class PriceProviderError(RuntimeError):
     """A price provider could not return usable data."""
 
 
+class PriceProviderConfigError(PriceProviderError):
+    """The provider is misconfigured (e.g. a required API token is not set)."""
+
+
+class PriceProviderAuthError(PriceProviderError):
+    """The provider rejected the credentials (HTTP 401 / 403)."""
+
+
 class PriceDataUnavailableError(PriceProviderError):
     """The provider has no data for the requested ticker / range."""
 
