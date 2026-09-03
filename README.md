@@ -5,12 +5,11 @@ its market data, and compute deterministic performance, risk and factor
 analytics behind a polished research dashboard.
 
 > **Status: Phase 1 (search + market-data ingestion), in sub-phases.**
-> 1A (DB models/migration), 1B (SEC security-universe seeding), 1C
-> (price-provider contract + normalisation + Pandera validation + NVDA split
-> spot-check), 1C.1 (Tiingo adapter, ADR 0022) and 1D (validated price
-> persistence + `ingest-prices` / `just ingest-demo`) are complete; 1E
+> 1A–1D (DB, SEC seeding, price provider + Pandera validation, Tiingo adapter,
+> validated persistence + `ingest-prices` / `just ingest-demo`) and 1E
 > (read-only `GET /securities`, `/securities/{ticker}`,
-> `/securities/{ticker}/prices`) is in review. No frontend features yet.
+> `/securities/{ticker}/prices`) are complete; 1F (frontend: security search →
+> ticker page → adjusted-price chart) is in review.
 > See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
 > [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
 
@@ -255,19 +254,41 @@ curl -s "http://localhost:8000/securities/nvda"
 curl -s "http://localhost:8000/securities/NVDA/prices?source=tiingo&start=2024-01-01&end=2024-12-31"
 ```
 
-### Frontend
+### Frontend (Phase 1F)
 
 ```bash
 cd frontend
 pnpm install
-pnpm dev                     # http://localhost:3000
+pnpm dev                     # http://localhost:3000  (needs the backend on :8000)
 ```
+
+The market-data experience: a **landing search** (`GET /securities?q=`, debounced,
+keyboard-navigable), a **ticker page** at `/securities/{ticker}`
+(`GET /securities/{ticker}`; unknown ticker → styled 404), and a
+**historical price chart** (`GET /securities/{ticker}/prices`). The chart plots
+`adj_close` (the V1 total-return series, ADR 0012) as a hand-drawn SVG line +
+area, with `1Y / 3Y / 5Y / MAX` range controls that translate to the API's
+`start` param, an optional dashed raw-`close` overlay, and a crosshair tooltip.
+The resolved `source` is shown next to the chart; series from different providers
+are never merged. No analytics are computed client-side.
+
+Stack additions: `next/font` for Inter + IBM Plex Mono; a hand-rolled SVG chart
+(no charting dependency); Vitest + Testing Library for component/logic tests.
+Light theme only.
+
+Run against the backend with `NEXT_PUBLIC_API_BASE_URL` (default
+`http://localhost:8000`). Running the backend outside Docker on Windows, bind
+uvicorn to `127.0.0.1` **and** browse the frontend on `http://localhost:3000`
+(the CORS allow-list origin); if the Next server can't reach the API, point
+`NEXT_PUBLIC_API_BASE_URL` at `http://127.0.0.1:8000` (Node resolves `localhost`
+to IPv6 first). The Docker Compose stack is unaffected.
 
 Checks:
 
 ```bash
 pnpm typecheck               # tsc --noEmit
 pnpm lint                    # next lint
+pnpm test                    # vitest run
 pnpm build                   # production build
 ```
 

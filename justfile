@@ -71,6 +71,7 @@ ingest-demo *ARGS:
 
 # Everything CI runs except Docker image builds
 check: lint typecheck import-boundaries test
+    cd frontend && pnpm test
     cd frontend && pnpm build
 
 # Validate the docker compose configuration (no daemon needed)

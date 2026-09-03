@@ -298,10 +298,12 @@ threshold is **suppressed**; the response carries a structured reason
 * **TanStack Query** is the single data layer for server state (ADR 0010):
   caching, retry, background refetch, request de-duplication. No Redux/Zustand
   for server data.
-* **API client** is generated from the backend OpenAPI schema (from Phase 1);
-  components never hand-type responses.
-* **Charting:** `lightweight-charts` (TradingView) for price/OHLC and rolling
-  series; a lightweight component for the correlation heatmap.
+* **API client** lives in `src/lib/api/` (typed fetchers + TanStack Query
+  hooks); components never call `fetch` directly. Types are hand-written against
+  the 1E schema for now; an OpenAPI-generated client can replace them later.
+* **Charting:** hand-drawn SVG for the daily price line (small, restrained,
+  matches the approved design - no charting dependency in Phase 1F). A richer
+  library may be revisited for later OHLC / correlation-heatmap needs.
 * Routes at end of Phase 3: `/securities/[ticker]`, `/compare`.
 
 ---
@@ -431,17 +433,23 @@ begins; no sub-phase pulls work forward from a later one.
   `quantscope ingest-prices` CLI (+ `just ingest-prices`); `just ingest-demo`
   for the six demo tickers. Provider-independent normalisation, the Pandera
   schema and `RawPriceBar` are unchanged. No migration.
-- **1E** *(in review)* - read-only REST: `GET /securities` (trigram search on
+- **1E** *(complete)* - read-only REST: `GET /securities` (trigram search on
   ticker/name, exact-ticker-first ordering, bounded `limit`/`offset`),
   `GET /securities/{ticker}` (normalised lookup, 404 on miss),
   `GET /securities/{ticker}/prices` (`start`/`end`/`source`, ascending
   `trade_date`, single source - defaults to `price_provider`, never merged;
   prices exact `Decimal` internally, serialised as JSON numbers at the API
-  boundary). `api/routers/securities.py` +
-  `api/schemas.py` + read functions in the existing repositories; no service
-  layer. **No migration; no writes; no analytics; no frontend.**
-- **1F** - frontend: security search, ticker page, and price chart
-  (`lightweight-charts`), wired through TanStack Query.
+  boundary). `api/routers/securities.py` + `api/schemas.py` + read functions in
+  the existing repositories; no service layer. No migration.
+- **1F** *(in review)* - frontend market-data experience against the 1E API
+  only: landing **search** (debounced `GET /securities?q=`, keyboard nav),
+  **ticker page** `/securities/[ticker]` (server component -> typed fetch ->
+  `notFound()` on 404 -> client chart panel), **price chart** plotting
+  `adj_close` (ADR 0012) as a hand-drawn SVG line + area with `1Y/3Y/5Y/MAX`
+  range controls (-> API `start`), optional dashed raw-`close` overlay,
+  crosshair tooltip, and a shown resolved `source`. `next/font` (Inter + IBM
+  Plex Mono); no charting dependency; Vitest + Testing Library. Light theme
+  only. **No analytics, no backend change, no migration.**
 
 No committed datasets - vendor data is never committed to the repository; tests
 use synthetic / hand-authored fixtures and documented local-fetch instructions

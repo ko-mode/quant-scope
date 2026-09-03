@@ -1,27 +1,16 @@
-import { API_BASE_URL } from "@/lib/api/client";
+import { SecuritySearch } from "@/components/SecuritySearch";
 
 export default function HomePage() {
   return (
-    <main className="page">
-      <h1>QuantScope</h1>
-      <p className="lede">
-        Quantitative equity research platform. This is the Phase&nbsp;0 scaffold - the
-        research dashboard is built in Phases&nbsp;1&ndash;3.
+    <main>
+      <div className="qs-landing">
+        <p className="qs-landing__eyebrow">QUANTITATIVE EQUITY RESEARCH</p>
+        <h1 className="qs-landing__headline">Search a security to begin research.</h1>
+        <SecuritySearch variant="hero" />
+      </div>
+      <p className="qs-footline">
+        US exchange-listed equities · Daily adjusted price history · Source: Tiingo
       </p>
-
-      <section>
-        <h2>Environment</h2>
-        <dl>
-          <dt>API base URL</dt>
-          <dd>
-            <code>{API_BASE_URL}</code>
-          </dd>
-          <dt>Health endpoint</dt>
-          <dd>
-            <code>{API_BASE_URL}/health</code>
-          </dd>
-        </dl>
-      </section>
     </main>
   );
 }

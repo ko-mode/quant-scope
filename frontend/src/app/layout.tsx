@@ -1,8 +1,22 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { IBM_Plex_Mono, Inter } from "next/font/google";
 
 import { Providers } from "./providers";
 import "./globals.css";
+
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-sans",
+});
+
+const plexMono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  display: "swap",
+  variable: "--font-mono",
+});
 
 export const metadata: Metadata = {
   title: "QuantScope",
@@ -11,7 +25,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${inter.variable} ${plexMono.variable}`}>
       <body>
         <Providers>{children}</Providers>
       </body>
