@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 
@@ -167,4 +168,33 @@ def upsert_price_bars(
     return total
 
 
-__all__ = ["PriceUpsertCounts", "upsert_price_bars"]
+# --------------------------------------------------------------------------- #
+# Read queries (Phase 1E API)
+# --------------------------------------------------------------------------- #
+def get_price_bars(
+    session: Session,
+    *,
+    security_id: int,
+    source: str,
+    start: datetime.date | None,
+    end: datetime.date | None,
+    limit: int,
+    offset: int,
+) -> Sequence[PriceBar]:
+    """Persisted daily bars for one security from **one** source, ``trade_date``
+    ascending. A single ``source`` is always applied, so rows from different
+    providers for the same ``(security_id, trade_date)`` are never merged.
+    """
+    stmt = select(PriceBar).where(
+        PriceBar.security_id == security_id,
+        PriceBar.source == source,
+    )
+    if start is not None:
+        stmt = stmt.where(PriceBar.trade_date >= start)
+    if end is not None:
+        stmt = stmt.where(PriceBar.trade_date <= end)
+    stmt = stmt.order_by(PriceBar.trade_date.asc()).limit(limit).offset(offset)
+    return session.scalars(stmt).all()
+
+
+__all__ = ["PriceUpsertCounts", "get_price_bars", "upsert_price_bars"]

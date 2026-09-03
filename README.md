@@ -7,9 +7,10 @@ analytics behind a polished research dashboard.
 > **Status: Phase 1 (search + market-data ingestion), in sub-phases.**
 > 1A (DB models/migration), 1B (SEC security-universe seeding), 1C
 > (price-provider contract + normalisation + Pandera validation + NVDA split
-> spot-check) and 1C.1 (Tiingo adapter, ADR 0022) are complete; 1D (validated
-> price persistence + `ingest-prices` / `just ingest-demo`) is in review.
-> No price APIs or frontend features yet.
+> spot-check), 1C.1 (Tiingo adapter, ADR 0022) and 1D (validated price
+> persistence + `ingest-prices` / `just ingest-demo`) are complete; 1E
+> (read-only `GET /securities`, `/securities/{ticker}`,
+> `/securities/{ticker}/prices`) is in review. No frontend features yet.
 > See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
 > [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
 
@@ -228,6 +229,31 @@ covers their full free-tier history, spans several market regimes for later
 beta / multi-year volatility / factor regressions, and costs just six API
 requests. Fetched observations are for internal/local use only and are never
 committed (ADR 0015). Phase 1D adds no migration and no API.
+
+### Read-only API (Phase 1E)
+
+Three GET routes over the seeded universe and the persisted price history.
+Served at the root (like `/health`); browse the schema at `/docs`.
+
+| Route | Notes |
+|---|---|
+| `GET /securities?q=&limit=&offset=` | Case-insensitive partial match on ticker **or** name (trigram-indexed). Exact ticker match sorts first, then `ticker` ascending. `limit` 1–200 (default 50). Inactive/delisted securities are included. Envelope: `{results, limit, offset, count}`. |
+| `GET /securities/{ticker}` | Ticker resolved via the shared normaliser, so `nvda` == `NVDA`. Unknown ticker → **404** (no fuzzy fallback). |
+| `GET /securities/{ticker}/prices?start=&end=&source=&limit=&offset=` | Persisted daily bars, `trade_date` ascending, from **one** `source`. `start`/`end` are inclusive ISO dates; `start > end` → **422**. `source` is `tiingo` or `stooq`; **when omitted it defaults to `QUANTSCOPE_PRICE_PROVIDER`** — series from different providers are never merged. `limit` 1–20000 (default 5000). A known security with no bars in range → **200** with an empty list. |
+
+Prices are exact `NUMERIC(18, 6)` / `Decimal` in the database and the domain
+layer; they are converted to `float` **only at the JSON boundary**, so the API
+emits numbers (`"close": 100.1`) — the precision the quant engine already works
+in, and directly usable by a charting frontend without a parse step. `count` is
+the number of rows **in this page**, not a universe-wide match total (clients
+detect "more" via `count == limit`). `security.id` and `price_bar.ingested_at`
+are not exposed. No analytics are computed here.
+
+```bash
+curl -s "http://localhost:8000/securities?q=nvda"
+curl -s "http://localhost:8000/securities/nvda"
+curl -s "http://localhost:8000/securities/NVDA/prices?source=tiingo&start=2024-01-01&end=2024-12-31"
+```
 
 ### Frontend
 

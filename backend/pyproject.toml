@@ -67,6 +67,8 @@ ignore = ["E501"]  # wrapping is handled by the formatter
 "alembic/env.py" = ["E402"]
 # ORM columns are named for their SQL identity (id, open); shadowing builtins is idiomatic here.
 "src/quantscope/db/models/*" = ["A003"]
+# API price schema mirrors the OHLC column names (open/high/low) on the wire.
+"src/quantscope/api/schemas.py" = ["A003"]
 # Typer uses callables (typer.Option/Argument) as parameter defaults by design.
 "src/quantscope/jobs/cli.py" = ["B008"]
 

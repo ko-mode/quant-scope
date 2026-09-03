@@ -1,7 +1,7 @@
 """FastAPI application factory.
 
-Phase 0 exposes only a liveness probe at ``GET /health``. Feature routers are
-added under ``/api/v1`` from Phase 1 onward.
+``GET /health`` is a liveness probe. Phase 1E adds the read-only securities and
+price-history routes under ``/securities``, served at the root like ``/health``.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from quantscope import __version__
-from quantscope.api.routers import health
+from quantscope.api.routers import health, securities
 from quantscope.config import Settings, get_settings
 
 
@@ -32,6 +32,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(securities.router)
 
     return app
 

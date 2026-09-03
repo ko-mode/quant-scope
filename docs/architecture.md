@@ -174,9 +174,9 @@ src/quantscope/
 ├── main.py                 app factory; /health, mounts /api/v1 routers
 ├── config.py               pydantic-settings; env-driven, dev defaults
 ├── api/
-│   └── routers/            securities, prices, analytics, compare,
-│                           fundamentals, factors
-├── schemas/                request/response DTOs (distinct from ORM)
+│   ├── routers/            securities (1E); analytics, compare, fundamentals,
+│   │                       factors (later)
+│   └── schemas.py          response DTOs, distinct from ORM (1E)
 ├── services/               one module per domain area; fundamentals resolver
 ├── quant/
 │   ├── conventions.py      annualisation factor (252), confidence levels,
@@ -210,7 +210,8 @@ src/quantscope/
 │   ├── session.py          engine + sessionmaker + get_session dependency
 │   ├── models/             security, price_bar, factor_return,
 │   │                       fundamental_fact, data_ingestion_run
-│   └── repositories/       securities.upsert_securities, prices.upsert_price_bars
+│   └── repositories/       securities (upsert + search/get_by_ticker),
+│                           prices (upsert + get_price_bars)
 └── jobs/
     └── cli.py              seed-securities (1B); ingest-prices (1D) ...
 ```
@@ -335,6 +336,14 @@ ADR 0021) -> **M2** `factor_return` (Phase 2) -> **M3** `fundamental_fact`
 All under `/api/v1`. Every analytics response embeds an `assumptions` object and
 may report individual metrics as suppressed with a structured reason (§5).
 
+> Phase 1E ships the first three rows as **read-only** routes served at the root
+> (like `/health`), not yet under `/api/v1`: `GET /securities?q=`,
+> `GET /securities/{ticker}`, `GET /securities/{ticker}/prices?start&end&source`.
+> `/prices` returns a single provider's series (defaulting to `price_provider`)
+> and never merges sources. Prices are exact `NUMERIC(18,6)` / `Decimal` in the
+> DB and domain layer, converted to `float` only at the JSON boundary, so the
+> API emits numbers (`"close": 100.1`) - the precision the quant engine uses.
+
 | Method & path                                   | Purpose                                                        |
 |-------------------------------------------------|---------------------------------------------------------------|
 | `GET /securities?query=`                        | Search the seeded universe (trigram on ticker + name).        |
@@ -414,17 +423,23 @@ begins; no sub-phase pulls work forward from a later one.
   `QUANTSCOPE_TIINGO_TOKEN`, error mapping, synthetic-fixture tests, guarded
   live smoke tests, live-verified NVDA split + dividend-back-adjustment
   spot-checks (2026-09-02). Stooq adapter retained.
-- **1D** *(in review)* - validated price-bar **persistence** into `price_bar`
+- **1D** *(complete)* - validated price-bar **persistence** into `price_bar`
   (`db/repositories/prices.py`, idempotent upsert on
   `(security_id, trade_date, source)`); `data/ingest.py` orchestration
   (fetch -> normalise -> validate -> persist) with `data_ingestion_run`
   start/success/partial/failed accounting, one run + one transaction per ticker;
   `quantscope ingest-prices` CLI (+ `just ingest-prices`); `just ingest-demo`
   for the six demo tickers. Provider-independent normalisation, the Pandera
-  schema and `RawPriceBar` are unchanged. **No migration; no APIs; no frontend.**
-- **1E** - REST endpoints `GET /securities`, `GET /securities/{ticker}`,
-  `GET /securities/{ticker}/prices` (service layer + Pydantic schemas +
-  OpenAPI).
+  schema and `RawPriceBar` are unchanged. No migration.
+- **1E** *(in review)* - read-only REST: `GET /securities` (trigram search on
+  ticker/name, exact-ticker-first ordering, bounded `limit`/`offset`),
+  `GET /securities/{ticker}` (normalised lookup, 404 on miss),
+  `GET /securities/{ticker}/prices` (`start`/`end`/`source`, ascending
+  `trade_date`, single source - defaults to `price_provider`, never merged;
+  prices exact `Decimal` internally, serialised as JSON numbers at the API
+  boundary). `api/routers/securities.py` +
+  `api/schemas.py` + read functions in the existing repositories; no service
+  layer. **No migration; no writes; no analytics; no frontend.**
 - **1F** - frontend: security search, ticker page, and price chart
   (`lightweight-charts`), wired through TanStack Query.
 

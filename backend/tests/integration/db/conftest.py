@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import Connection, Engine, create_engine
 from sqlalchemy.orm import Session
 
@@ -76,3 +77,29 @@ def session(connection: Connection) -> Iterator[Session]:
         yield sess
     finally:
         sess.close()
+
+
+@pytest.fixture
+def api_client(connection: Connection) -> Iterator[TestClient]:
+    """A FastAPI TestClient whose ``get_session`` dependency rides the test's
+    rolled-back transaction, so API reads see rows the test inserted and nothing
+    the API touches is committed for real.
+    """
+    from quantscope.db.session import get_session
+    from quantscope.main import create_app
+
+    app = create_app()
+
+    def _session_override() -> Iterator[Session]:
+        sess = Session(bind=connection, join_transaction_mode="create_savepoint")
+        try:
+            yield sess
+        finally:
+            sess.close()
+
+    app.dependency_overrides[get_session] = _session_override
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
