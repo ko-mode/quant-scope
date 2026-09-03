@@ -3,7 +3,7 @@
 **Status:** approved for implementation (MVP scope = Phases 0-3)
 **Last updated:** 2026-08-30 - Phase 0 review (provenance, fundamentals mapping,
 quant conventions, dependency contract, DataFrame contracts, product priorities,
-task runner); Phase 1A-1C.1 in progress (ADRs 0021-0022; Phase 1 split into
+task runner); Phase 1A-1D in progress (ADRs 0021-0022; Phase 1 split into
 sub-phases 1A-1F)
 
 QuantScope is a quantitative equity research platform. This document describes
@@ -204,15 +204,15 @@ src/quantscope/
 │   ├── validation.py       Pandera PRICE_BAR_SCHEMA + validate_price_bars()
 │   ├── spot_checks.py      NVDA split + dividend-back-adjustment checks
 │   ├── canonical_metrics.py  ordered US-GAAP tag lists per displayed metric
-│   └── ingest.py           fetch -> validate -> normalise -> upsert (persistence, Phase 1D)
+│   └── ingest.py           fetch -> normalise -> validate -> persist + run record (1D)
 ├── db/
 │   ├── base.py             DeclarativeBase (+ constraint naming convention)
 │   ├── session.py          engine + sessionmaker + get_session dependency
 │   ├── models/             security, price_bar, factor_return,
 │   │                       fundamental_fact, data_ingestion_run
-│   └── repositories/       securities.upsert_securities (+ more per aggregate)
+│   └── repositories/       securities.upsert_securities, prices.upsert_price_bars
 └── jobs/
-    └── cli.py              seed-securities (1B); ingest-demo (1D) ...
+    └── cli.py              seed-securities (1B); ingest-prices (1D) ...
 ```
 
 Packages for portfolio, backtesting, filings, AI and auth are **not created**
@@ -409,14 +409,19 @@ begins; no sub-phase pulls work forward from a later one.
   reasons**; hand-authored **NVDA 10:1 split adjusted-price spot-check**; Stooq
   adapter (synthetic fixtures; live fetch anti-bot blocked). **No persistence,
   APIs, or frontend.**
-- **1C.1** *(in review)* - **Tiingo adapter** adopted as the V1 live provider
+- **1C.1** *(complete)* - **Tiingo adapter** adopted as the V1 live provider
   (ADR 0022): `TiingoDailyPriceProvider` + pure `parse_tiingo_eod`, config +
   `QUANTSCOPE_TIINGO_TOKEN`, error mapping, synthetic-fixture tests, guarded
-  live smoke tests, live NVDA split + dividend-back-adjustment spot-checks.
-  Stooq adapter retained. **Still no persistence.**
-- **1D** - validated price-bar persistence into `price_bar`; `data/ingest.py`
-  orchestration with `data_ingestion_run` integration; `just ingest-demo` for
-  the demo tickers (uses Tiingo).
+  live smoke tests, live-verified NVDA split + dividend-back-adjustment
+  spot-checks (2026-09-02). Stooq adapter retained.
+- **1D** *(in review)* - validated price-bar **persistence** into `price_bar`
+  (`db/repositories/prices.py`, idempotent upsert on
+  `(security_id, trade_date, source)`); `data/ingest.py` orchestration
+  (fetch -> normalise -> validate -> persist) with `data_ingestion_run`
+  start/success/partial/failed accounting, one run + one transaction per ticker;
+  `quantscope ingest-prices` CLI (+ `just ingest-prices`); `just ingest-demo`
+  for the six demo tickers. Provider-independent normalisation, the Pandera
+  schema and `RawPriceBar` are unchanged. **No migration; no APIs; no frontend.**
 - **1E** - REST endpoints `GET /securities`, `GET /securities/{ticker}`,
   `GET /securities/{ticker}/prices` (service layer + Pydantic schemas +
   OpenAPI).

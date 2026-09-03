@@ -4,7 +4,7 @@
 # which remains the source of truth. Requires: just, uv (backend),
 # pnpm (frontend), docker (for `just dev` / `just compose-config`).
 #
-# `ingest-demo` (price data for the demo tickers) is added in Phase 1C.
+# `ingest-demo` (price data for the demo tickers) is added in Phase 1D.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
@@ -53,6 +53,21 @@ db-check:
 # Needs network; or pass a local file: `just seed -- --source-file path/to.json`.
 seed *ARGS:
     cd backend && uv run quantscope seed-securities {{ARGS}}
+
+# Ingest daily prices for one ticker (must be seeded). Uses QUANTSCOPE_PRICE_PROVIDER.
+# e.g. `just ingest-prices NVDA -- --start 2015-01-01 --end 2025-01-31`
+ingest-prices TICKER *ARGS:
+    cd backend && uv run quantscope ingest-prices {{TICKER}} {{ARGS}}
+
+# Ingest ~20y of daily prices for the six demo securities via the configured
+# provider. Range 2005-01-01..today: covers every demo ticker's full free-tier
+# history, spans multiple market regimes for later beta / 3-5y vol / factor
+# regressions, and is just 6 API requests total. A single ticker failing does
+# not abort the batch; the recipe still exits non-zero if any did.
+ingest-demo *ARGS:
+    cd backend && rc=0; for t in NVDA AMD INTC AAPL MSFT SPY; do \
+        uv run quantscope ingest-prices "$t" --start 2005-01-01 {{ARGS}} || rc=1; \
+    done; exit $rc
 
 # Everything CI runs except Docker image builds
 check: lint typecheck import-boundaries test

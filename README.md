@@ -5,10 +5,11 @@ its market data, and compute deterministic performance, risk and factor
 analytics behind a polished research dashboard.
 
 > **Status: Phase 1 (search + market-data ingestion), in sub-phases.**
-> 1A (DB models/migration), 1B (SEC security-universe seeding) and 1C
+> 1A (DB models/migration), 1B (SEC security-universe seeding), 1C
 > (price-provider contract + normalisation + Pandera validation + NVDA split
-> spot-check) are complete; 1C.1 (Tiingo adapter, ADR 0022) is in review.
-> No price persistence, price APIs or frontend features yet.
+> spot-check) and 1C.1 (Tiingo adapter, ADR 0022) are complete; 1D (validated
+> price persistence + `ingest-prices` / `just ingest-demo`) is in review.
+> No price APIs or frontend features yet.
 > See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
 > [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
 
@@ -69,11 +70,10 @@ below and remains the source of truth.
 | `just migrate`           | backend `alembic upgrade head`                              |
 | `just db-check`          | backend `alembic check` (models vs migrations)              |
 | `just seed *ARGS`        | backend `quantscope seed-securities` (security universe from SEC) |
+| `just ingest-prices TICKER *ARGS` | backend `quantscope ingest-prices` for one seeded ticker |
+| `just ingest-demo *ARGS` | ingest ~20y of daily prices for the six demo tickers (NVDA AMD INTC AAPL MSFT SPY) |
 | `just check`             | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
 | `just compose-config`    | `docker compose config` (no daemon needed)                  |
-
-`just ingest-demo` (price data for the demo tickers) is added in Phase 1D, once
-that CLI command exists.
 
 ---
 
@@ -193,9 +193,41 @@ The **Stooq** adapter (`quantscope.data.providers.stooq`) is retained as a
 second `DailyPriceProvider` implementation and offline CSV parser; its live
 endpoint is anti-bot gated and cannot be used for automated ingestion (ADR 0022).
 
-Phase 1C.1 adds only the adapter and its tests - **no persistence, no CLI, no
-APIs** (those are Phase 1D–1E). Guarded live smoke tests in
-`backend/tests/integration/live/` run only when `QUANTSCOPE_TIINGO_TOKEN` is set.
+Guarded live smoke tests in `backend/tests/integration/live/` run only when
+`QUANTSCOPE_TIINGO_TOKEN` is set.
+
+### Ingest daily prices (Phase 1D)
+
+Fetch → normalise → Pandera-validate → persist one **already-seeded** ticker's
+daily bars into `price_bar`. Requires the migration applied and the security
+universe seeded; ingestion never creates `security` rows.
+
+```bash
+export QUANTSCOPE_DATABASE_URL=postgresql+psycopg://quantscope:quantscope@localhost:5432/quantscope
+export QUANTSCOPE_TIINGO_TOKEN=<your token>          # provider default is Tiingo (ADR 0022)
+
+uv run quantscope ingest-prices NVDA --start 2015-01-01 --end 2025-01-31
+uv run quantscope ingest-prices NVDA --start 2015-01-01                 # --end defaults to today
+uv run quantscope ingest-prices NVDA --start 2015-01-01 --dry-run       # fetch+validate only, no writes, no run row
+uv run quantscope ingest-prices NVDA --start 2015-01-01 --provider stooq
+just ingest-demo                                                        # all six demo tickers, 2005-01-01..today
+```
+
+Each ticker is one transaction and one `data_ingestion_run` row (`entity='prices'`):
+`success` (all bars valid), `partial` (some/all bars dropped by normalisation or
+Pandera - reasons are logged and counted), or `failed` (provider/network/auth
+error, unknown ticker, or a DB error - nothing is persisted). Persistence is
+idempotent on the composite identity `(security_id, trade_date, source)`: a
+re-run of unchanged data writes nothing and leaves the row count stable; changed
+vendor values update in place; a second `source` for the same security/date
+coexists rather than overwriting. The command prints a one-line JSON summary
+(`inserted` / `updated` / `unchanged` / `rows_written` / `status`).
+
+`just ingest-demo` uses **2005-01-01 → today** for all six demo tickers: it
+covers their full free-tier history, spans several market regimes for later
+beta / multi-year volatility / factor regressions, and costs just six API
+requests. Fetched observations are for internal/local use only and are never
+committed (ADR 0015). Phase 1D adds no migration and no API.
 
 ### Frontend
 
