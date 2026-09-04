@@ -90,3 +90,42 @@ response exposes `observations_used`, `aligned_start`, `aligned_end`.
   explain.
 - **Per-metric configurable thresholds via API** - deferred: fixed, centralised
   values are simpler and enough for V1.
+
+## Addendum (2026-09-04, Phase 2A implementation)
+
+Clarifications settled while building `quantscope.quant`. The decision above is
+unchanged; these only pin down details it left open.
+
+- **Simple-return convention.** Daily return `r_t = P_t / P_{t-1} - 1` from the
+  adjusted close; the first price yields no observation. No log returns in the
+  V1 user-facing path.
+- **VaR / ES quantile estimator.** The empirical `(1 - alpha)` quantile is the
+  *lower* order statistic, no interpolation: sorted ascending, index
+  `floor((1 - alpha)(n - 1))`. Tie-safe and always an observed return. The ES
+  tail is `r_t <= r*` (inclusive). No flooring at zero, so an all-gains tail
+  can report a negative VaR.
+- **Scalar risk-free convenience.** The Sharpe interface takes a daily `RF`
+  series; a scalar *annual* rate, if given, is compounded to a daily rate,
+  `(1 + r)^(1/252) - 1`, never divided by 252.
+- **Undefined vs suppressed vs rejected.** A zero-variance denominator (Sharpe
+  daily excess, CAPM benchmark excess) returns an explicit
+  `status: "undefined"`. A structurally invalid series (bad index, unsorted or
+  duplicated dates, non-finite values, non-positive prices) raises. `status:
+  "insufficient_observations"` is reserved for a well-formed series shorter than
+  its gate.
+- **CAPM `r_squared` when the asset's excess return is constant.** The
+  regression is still valid (benchmark varies, so beta and alpha are defined and
+  returned), but `R^2 = 1 - SS_res / SS_tot` is `0 / 0`. `BetaResult.r_squared`
+  is therefore `float | None` and is `None` in this case - matching
+  `statsmodels`, which yields `nan` for a zero total sum of squares. It is *not*
+  clamped to `0.0` (that is a `scikit-learn` pipeline convenience, documented in
+  its own API as "not finite / not interesting", not a statistical convention).
+  A constant *benchmark* excess return is different: beta itself is undefined,
+  so the whole result is `UndefinedResult`.
+- **Drawdown recovery.** The result reports the running-peak date, the trough
+  date and - when wealth regains the peak within the window - the recovery
+  date. A series that never draws down reports `max_drawdown = 0.0` with null
+  peak / trough / recovery dates (no episode occurred).
+- **Suppression object field names.** `InsufficientObservations(metric,
+  required, observations_used, status)` - the wire names from this ADR, carried
+  unchanged from the engine through to the response (no internal renaming).

@@ -228,13 +228,16 @@ All constants live in `quantscope.quant.conventions`; every affected response
 echoes the relevant values in its `assumptions` block.
 
 ### Returns
-Total return computed from adjusted close (ADR 0012). Simple (arithmetic)
-returns for aggregation and compounding; log returns only where a function's
-maths requires additivity, documented per function.
+Total return computed from adjusted close (ADR 0012). V1 treats the vendor
+adjusted close as the total-return price. The daily return is simple
+close-to-close, `r_t = P_t / P_{t-1} - 1`; the first price yields no return
+observation. Simple (arithmetic) returns are used everywhere in the V1
+user-facing path - there are no log returns in it.
 
 ### Volatility
 Sample standard deviation (`ddof=1`) of daily total returns, annualised by
-**sqrt(252)**.
+**sqrt(252)**. 252 is a trading-session count, not calendar days. A constant
+return series has volatility exactly `0.0` - a value, not a suppression.
 
 ### Sharpe ratio
 `mean(daily excess return) / stdev(daily excess return) * sqrt(252)`, where
@@ -242,12 +245,23 @@ daily excess return = daily total return - daily Ken French `RF`. This is
 documented as an **annualisation convention**: sqrt(252) assumes i.i.d. daily
 returns, so autocorrelation in daily returns biases the annualised figure
 (positive autocorrelation inflates it, negative deflates it). Reported, not
-corrected, in V1; the `assumptions` block flags it.
+corrected, in V1; the `assumptions` block flags it. The risk-free input is a
+**daily** series; a scalar *annual* rate, if supplied as a convenience, is
+converted to an equivalent daily rate by compounding,
+`rf_daily = (1 + rf_annual)^(1/252) - 1`, and subtracted from each daily return
+- the annual rate itself is never subtracted. A zero-variance daily excess
+series makes the ratio **undefined**, reported as such rather than as a number.
 
 ### Beta (user-facing / CAPM)
 OLS slope of the security's daily excess return on **SPY's** daily excess
 return, both from **total-return-adjusted** prices, over the requested window,
-with `RF` = Ken French `RF`.
+with `RF` = Ken French `RF`. Fitted by `numpy.linalg.lstsq` with an intercept,
+on the **inner join** of the asset and benchmark trading dates (and of the
+daily risk-free series when supplied). The intercept (`alpha_daily`) is a daily
+figure and is not annualised. A zero-variance benchmark excess series makes the
+beta **undefined**. If instead only the *asset's* excess return is constant,
+beta and alpha are still valid and returned, but `r_squared` is `null`:
+`R^2 = 1 - SS_res / SS_tot` is `0 / 0` there, undefined rather than zero.
 
 ### Fama-French 3-factor regression
 OLS of the security's daily excess return on Ken French **Mkt-RF, SMB, HML**,
@@ -264,6 +278,13 @@ with **Newey-West (HAC)** standard errors.
 * `VaR_alpha = -(empirical (1 - alpha) quantile of daily total returns)`,
   reported as a **positive loss**.
 * `ES_alpha = -(mean of daily returns at or below that quantile)`.
+* The quantile is the **lower empirical order statistic** (no interpolation):
+  with returns sorted ascending, `r* = value at index floor((1 - alpha)(n - 1))`.
+  It is an actually observed return and is deterministic when several
+  observations tie at the tail. The ES tail is `{ r_t : r_t <= r* }` (inclusive).
+* Both figures are positive loss magnitudes; a sample with no losses in the tail
+  can therefore yield a negative VaR (a gain), reported as-is, not floored at
+  zero.
 * **No square-root-of-time or any multi-day scaling.** Multi-day horizons are
   out of scope until a later phase adds a defensible method.
 * Confidence levels reported: **95% and 99%**.
@@ -272,6 +293,10 @@ with **Newey-West (HAC)** standard errors.
 Centralised. A metric computed from fewer usable daily observations than its
 threshold is **suppressed**; the response carries a structured reason
 `{metric, status: "insufficient_observations", required, observations_used}`.
+Structurally invalid inputs (non-datetime index, unsorted or duplicated dates,
+non-finite values, non-positive prices) are rejected with an explicit error -
+suppression is only for a well-formed series that is merely too short. A metric
+whose denominator has zero variance is reported `{..., status: "undefined"}`.
 
 | Threshold (usable daily obs) | Metrics gated                                        |
 |------------------------------|-----------------------------------------------------|
