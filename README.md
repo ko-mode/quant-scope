@@ -4,12 +4,12 @@ A quantitative equity research platform: search a US equity, ingest and store
 its market data, and compute deterministic performance, risk and factor
 analytics behind a polished research dashboard.
 
-> **Status: Phase 1 (search + market-data ingestion), in sub-phases.**
-> 1A–1D (DB, SEC seeding, price provider + Pandera validation, Tiingo adapter,
-> validated persistence + `ingest-prices` / `just ingest-demo`) and 1E
-> (read-only `GET /securities`, `/securities/{ticker}`,
-> `/securities/{ticker}/prices`) are complete; 1F (frontend: security search →
-> ticker page → adjusted-price chart) is in review.
+> **Status: Phase 2 (deterministic single-name analytics), in sub-phases.**
+> Phase 1 (DB, SEC seeding, Tiingo price provider + Pandera validation,
+> validated persistence, the read-only `GET /securities[...]` API, and the
+> frontend search → ticker page → adjusted-price chart) is complete. Phase 2A
+> (the pure `quantscope.quant` engine) is complete; 2B adds
+> `GET /securities/{ticker}/analytics`.
 > See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
 > [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
 
@@ -253,6 +253,27 @@ curl -s "http://localhost:8000/securities?q=nvda"
 curl -s "http://localhost:8000/securities/nvda"
 curl -s "http://localhost:8000/securities/NVDA/prices?source=tiingo&start=2024-01-01&end=2024-12-31"
 ```
+
+### Analytics API (Phase 2B)
+
+`GET /securities/{ticker}/analytics?start=&end=&source=` exposes the pure
+`quantscope.quant` engine over persisted price history.
+
+| Aspect | Behaviour |
+|---|---|
+| Input | One price `source`'s **adjusted-close** bars for the window (defaults to `QUANTSCOPE_PRICE_PROVIDER`; sources are never merged; no raw-close fallback). `start`/`end` are inclusive ISO dates, both optional; omitted ⇒ all persisted history. `start > end` → **422**. Unknown ticker → **404**. |
+| Metrics | `return_summary`, `volatility`, `drawdown` (summary fields only), `var_es_95`, `var_es_99`. Each carries a `status`: `ok` \| `insufficient_observations` (below the ADR 0017 gate — 60 for return/vol/drawdown, 126 for VaR/ES) \| `undefined` \| `unavailable`. One suppressed metric never fails the response; a security with `< 2` bars returns **200** with everything suppressed. |
+| Sharpe & beta | Present in the schema but `status: "unavailable"`, `reason: "risk_free_series_not_ingested"`. ADR 0017 defines them against the Ken French daily `RF` series (ADR 0013), which is ingested in **M2**; no constant/zero RF is substituted. They light up automatically once M2 lands. |
+| Metadata | `price_observations`, `return_observations`, `analytics_start` / `analytics_end` (first/last **return** dates), and an `assumptions` block (ADR 0005): `annualisation_factor` 252, `calendar` XNYS, `return_type` total, `rf_source` / `rf`, `benchmark` SPY, VaR horizon 1 / scaling none, `min_observations`, and a `suppressed` list. |
+| Numbers | `float` end to end (the engine's precision) → JSON numbers; `null` for absent values; OpenAPI describes them as `number`, never `string`. |
+
+```bash
+curl -s "http://localhost:8000/securities/NVDA/analytics?source=tiingo"
+curl -s "http://localhost:8000/securities/NVDA/analytics?start=2021-01-01&end=2023-12-31"
+```
+
+Analytics are deterministic: identical persisted inputs always yield identical
+output, and no wall-clock time is read.
 
 ### Frontend (Phase 1F)
 

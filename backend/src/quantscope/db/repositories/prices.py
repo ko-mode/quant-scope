@@ -197,4 +197,36 @@ def get_price_bars(
     return session.scalars(stmt).all()
 
 
-__all__ = ["PriceUpsertCounts", "get_price_bars", "upsert_price_bars"]
+def get_all_price_bars(
+    session: Session,
+    *,
+    security_id: int,
+    source: str,
+    start: datetime.date | None,
+    end: datetime.date | None,
+) -> Sequence[PriceBar]:
+    """Every persisted bar for one security from **one** ``source``, ``trade_date``
+    ascending and unpaginated.
+
+    Backs the Phase 2B analytics service, which needs the whole window as a
+    single contiguous series. Like :func:`get_price_bars`, a single ``source`` is
+    always applied, so provider series are never merged.
+    """
+    stmt = select(PriceBar).where(
+        PriceBar.security_id == security_id,
+        PriceBar.source == source,
+    )
+    if start is not None:
+        stmt = stmt.where(PriceBar.trade_date >= start)
+    if end is not None:
+        stmt = stmt.where(PriceBar.trade_date <= end)
+    stmt = stmt.order_by(PriceBar.trade_date.asc())
+    return session.scalars(stmt).all()
+
+
+__all__ = [
+    "PriceUpsertCounts",
+    "get_all_price_bars",
+    "get_price_bars",
+    "upsert_price_bars",
+]

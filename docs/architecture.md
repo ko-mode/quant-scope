@@ -167,6 +167,40 @@ It must **not** import: `quantscope.api`, `quantscope.services`,
 * **No custom DataFrame wrapper classes** created solely to satisfy static
   typing.
 
+### Analytics service flow (Phase 2B)
+
+`GET /securities/{ticker}/analytics` is the first route with a real service
+layer (`quantscope.services.analytics`). The flow is strictly one-directional:
+
+```
+router: resolve ticker (404) · reject start>end (422) · resolve source
+   -> service:
+        db.repositories.prices.get_all_price_bars(security, source, start, end)   # one source, ascending, unpaginated
+        -> adjusted-close pandas.Series          # float(adj_close); raw close is never read (ADR 0012)
+        -> quant.simple_returns(prices)          # called ONCE, reused
+        -> quant.return_summary / annualised_volatility / drawdown_analysis /
+           historical_var_es(0.95) / historical_var_es(0.99)
+        -> map each result dataclass -> its Pydantic metric model
+        -> assemble the ADR 0005 `assumptions` block
+```
+
+* **Deterministic.** No clock is read; `assumptions.as_of` is the last daily
+  **return** date. `analytics_start` / `analytics_end` are return-observation
+  dates (not price-bar dates).
+* **Partial availability is normal.** Every metric object carries a `status`
+  (`ok` / `insufficient_observations` / `undefined` / `unavailable`); a security
+  with `< 2` bars returns all-suppressed with HTTP 200. One metric is never
+  allowed to fail the response.
+* **Risk-free rate.** ADR 0017 defines Sharpe and CAPM beta against the Ken
+  French daily `RF` series (ADR 0013), stored in `factor_return`. That table and
+  its ingestion arrive with **migration M2**. Until then the service's
+  `_load_daily_risk_free` reader returns `None`, and **both Sharpe and CAPM beta
+  are reported `status: "unavailable"`, `reason: "risk_free_series_not_ingested"`**
+  - no constant or zero RF is ever substituted (ADR 0013 rejected that). M2
+  replaces that one reader and the two metrics light up with no route change.
+* **No pandas in the router.** SQL stays in the repository; the router owns only
+  HTTP status codes.
+
 ### Package map (target state at end of Phase 3)
 
 ```
@@ -370,13 +404,24 @@ may report individual metrics as suppressed with a structured reason (§5).
 > and never merges sources. Prices are exact `NUMERIC(18,6)` / `Decimal` in the
 > DB and domain layer, converted to `float` only at the JSON boundary, so the
 > API emits numbers (`"close": 100.1`) - the precision the quant engine uses.
+>
+> Phase 2B ships `GET /securities/{ticker}/analytics?start&end&source`, also at
+> the root. It resolves the ticker (404 on miss), loads one source's persisted
+> **adjusted-close** bars for the window, derives daily simple returns once, and
+> runs the pure Phase 2A engine. Each metric object carries a `status`
+> (`ok` / `insufficient_observations` / `undefined` / `unavailable`); one
+> unavailable metric never fails the response. **Sharpe and CAPM beta return
+> `unavailable` until Ken French `RF` is ingested (M2)** - see §5. Metric
+> numbers are `float` end to end, so they serialise as JSON numbers. No
+> `benchmark` / `window` query params: beta is always vs SPY, and the window is
+> plain `start`/`end` dates.
 
 | Method & path                                   | Purpose                                                        |
 |-------------------------------------------------|---------------------------------------------------------------|
 | `GET /securities?query=`                        | Search the seeded universe (trigram on ticker + name).        |
 | `GET /securities/{ticker}`                      | Security profile.                                             |
 | `GET /securities/{ticker}/prices?start&end`     | Historical daily bars.                                        |
-| `GET /securities/{ticker}/analytics?start&end&benchmark&window` | Return / volatility / Sharpe / beta (vs SPY) / max drawdown / 1-day historical VaR / 1-day historical ES + `assumptions`. |
+| `GET /securities/{ticker}/analytics?start&end&source` | Return summary / volatility / Sharpe / max drawdown / CAPM beta (vs SPY) / 1-day historical VaR & ES at 95% and 99% + `assumptions`. One source, adjusted close, per-metric `status`. Sharpe & beta `unavailable` until M2 (RF). Shipped in Phase 2B. |
 | `GET /securities/{ticker}/risk?confidence&level` | 1-day historical VaR / ES detail (95% and 99%).              |
 | `GET /securities/{ticker}/fundamentals`         | Revenue, earnings, growth, market cap, P/E, forward P/E, P/S. Each value resolved via the canonical-metric mapping and tagged with `tag`, `period_end`, `filed_date`, `accession_no`; **returned as `unavailable` (with a reason) when no mapped tag is present** - never guessed. |
 | `GET /securities/{ticker}/factors?model=ff3&start&end` | FF3 regression: Mkt-RF / SMB / HML coefficients, HAC standard errors, t-stats, R², n. Response states explicitly that the Mkt-RF coefficient is **not** the SPY CAPM beta. |
@@ -481,12 +526,22 @@ use synthetic / hand-authored fixtures and documented local-fetch instructions
 (ADR 0015).
 
 ### Phase 2 - Deterministic single-name analytics
-`quant/conventions`, `quant/returns|risk|drawdown|performance` with
-golden-value + edge-case tests; centralised observation thresholds with
-structured suppression; Ken French daily factor ingestion (provides `RF`); `SPY`
-ingested as benchmark; `GET /securities/{ticker}/analytics` with the
-`assumptions` block; rolling series + 1-day VaR/ES endpoints. Frontend: metrics
-panel, rolling and drawdown charts. **Migration M2.**
+Delivered in sub-phases.
+
+- **2A** *(complete)* - `quant/conventions`, `quant/{returns,risk,drawdown,
+  performance,frames}` with golden-value + edge-case tests; centralised
+  observation thresholds (60/126/250) with structured `InsufficientObservations`
+  / `UndefinedResult`; CI-enforced pure boundary.
+- **2B** *(this phase)* - `quantscope.services.analytics` +
+  `GET /securities/{ticker}/analytics`: return summary, annualised volatility,
+  max-drawdown summary, 1-day historical VaR/ES at 95% and 99%, plus the ADR
+  0005 `assumptions` block, all from persisted adjusted-close bars for one
+  source. **Sharpe and CAPM beta are wired but `unavailable`** pending the RF
+  series. No migration. No frontend.
+- **M2 + later 2** - Ken French daily factor ingestion (provides `RF`); `SPY`
+  ingested as benchmark; Sharpe and CAPM beta become `ok`; rolling series +
+  drawdown time-series endpoints. Frontend: metrics panel, rolling and drawdown
+  charts. **Migration M2.**
 
 ### Phase 3 - Comparison, correlation, fundamentals, factor regression
 SEC EDGAR fundamentals ingestion (`filed_date`, `accession_no`);

@@ -33,3 +33,23 @@ block reports `rf_source = "kenneth_french_daily"` and the effective rate used.
   for no MVP benefit; less consistent with the FF regressions.
 - **Constant RF from config** - rejected: wrong across multi-year windows and
   hides a real assumption.
+
+## Addendum (2026-09-04, Phase 2B analytics API)
+
+The Phase 2B analytics endpoint (`GET /securities/{ticker}/analytics`) ships
+before Ken French factor ingestion and migration M2, so `factor_return` - and
+therefore the `RF` series this ADR mandates - does not exist yet.
+
+Rather than substitute a constant or zero RF (which this ADR rejects), the
+analytics service **withholds both metrics that depend on RF**: Sharpe *and*
+CAPM beta are returned with `status: "unavailable"`,
+`reason: "risk_free_series_not_ingested"`, and `assumptions.rf` is `null` with
+`rf_source: "none_pending_fama_french_ingestion"`. The other metrics (return
+summary, volatility, drawdown, historical VaR/ES) are unaffected.
+
+`quantscope.services.analytics._load_daily_risk_free(session, start, end)` is
+the reader seam this ADR anticipated ("the reader abstraction in the service
+layer localises the change"). It returns `None` today; M2 makes it read the
+daily `RF` rows from `factor_return`, at which point Sharpe and beta become
+`ok` with **no change to the route, the schema, or the engine**. When that
+lands, `rf_source` becomes `"kenneth_french_daily"` per the decision above.
