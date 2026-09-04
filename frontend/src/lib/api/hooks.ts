@@ -3,8 +3,14 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import { rangeToParams, type RangeOption } from "@/lib/format";
+import { getComparison, MIN_COMPARISON_TICKERS } from "./comparison";
 import { getSecurityAnalytics, getSecurityPrices, MIN_SEARCH_LENGTH, searchSecurities } from "./securities";
-import type { AnalyticsResponse, PriceHistoryResponse, SecurityListResponse } from "./types";
+import type {
+  AnalyticsResponse,
+  ComparisonResponse,
+  PriceHistoryResponse,
+  SecurityListResponse,
+} from "./types";
 
 /**
  * Interactive search. `q` should already be debounced by the caller. The query
@@ -45,6 +51,24 @@ export function useSecurityAnalytics(ticker: string, range: RangeOption) {
     queryKey: ["securities", ticker, "analytics", range],
     queryFn: ({ signal }) =>
       getSecurityAnalytics(ticker, { ...rangeToParams(range), init: { signal } }),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * Multi-security comparison for a range button. `GET /compare` requires 2-8
+ * distinct tickers (Phase 3A `MIN_COMPARISON_TICKERS`/`MAX_COMPARISON_TICKERS`);
+ * with fewer than 2 selected the query is disabled entirely - no request is
+ * ever issued and no 422 can reach the UI. The query key includes the sorted
+ * ticker set so an unrelated selection order does not force a needless refetch.
+ */
+export function useComparison(tickers: readonly string[], range: RangeOption) {
+  const sorted = [...tickers].sort();
+  return useQuery<ComparisonResponse>({
+    queryKey: ["compare", sorted, range],
+    queryFn: ({ signal }) => getComparison(tickers, { ...rangeToParams(range), init: { signal } }),
+    enabled: tickers.length >= MIN_COMPARISON_TICKERS,
     placeholderData: keepPreviousData,
     staleTime: 60_000,
   });

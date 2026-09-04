@@ -25,7 +25,20 @@ const PLACEHOLDER: Record<Variant, string> = {
   bar: "Search ticker or company",
 };
 
-export function SecuritySearch({ variant = "hero" }: { variant?: Variant }) {
+export interface SecuritySearchProps {
+  variant?: Variant;
+  placeholder?: string;
+  /**
+   * When given, selecting a result calls this instead of navigating to the
+   * security's page - reuses the search UI as a picker (e.g. "add ticker" in
+   * the Comparison tab) without the single-security navigation behaviour.
+   */
+  onSelect?: (security: SecurityRead) => void;
+  /** Tickers to hide from results, e.g. already-selected comparison tickers. */
+  excludeTickers?: readonly string[];
+}
+
+export function SecuritySearch({ variant = "hero", placeholder, onSelect, excludeTickers }: SecuritySearchProps) {
   const router = useRouter();
   const baseId = useId();
   const listId = `${baseId}-list`;
@@ -36,7 +49,8 @@ export function SecuritySearch({ variant = "hero" }: { variant?: Variant }) {
 
   const debounced = useDebounced(text.trim(), 250);
   const query = useSecuritySearch(debounced);
-  const results: SecurityRead[] = query.data?.results ?? [];
+  const exclude = new Set(excludeTickers ?? []);
+  const results: SecurityRead[] = (query.data?.results ?? []).filter((s) => !exclude.has(s.ticker));
 
   const open = focused && text.trim().length >= MIN_SEARCH_LENGTH;
   const showResults = open && query.isSuccess && results.length > 0;
@@ -46,7 +60,11 @@ export function SecuritySearch({ variant = "hero" }: { variant?: Variant }) {
   useEffect(() => () => { if (blurTimer.current) clearTimeout(blurTimer.current); }, []);
 
   function navigate(security: SecurityRead) {
-    router.push(securityHref(security.ticker));
+    if (onSelect) {
+      onSelect(security);
+    } else {
+      router.push(securityHref(security.ticker));
+    }
     setFocused(false);
     setText("");
   }
@@ -81,7 +99,7 @@ export function SecuritySearch({ variant = "hero" }: { variant?: Variant }) {
         type="search"
         autoComplete="off"
         autoFocus={variant === "hero"}
-        placeholder={PLACEHOLDER[variant]}
+        placeholder={placeholder ?? PLACEHOLDER[variant]}
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onKeyDown}
@@ -134,7 +152,12 @@ export function SecuritySearch({ variant = "hero" }: { variant?: Variant }) {
                     className="qs-result"
                     href={securityHref(s.ticker)}
                     onMouseEnter={() => setActive(i)}
-                    onClick={() => {
+                    onClick={(e) => {
+                      if (onSelect) {
+                        e.preventDefault();
+                        navigate(s);
+                        return;
+                      }
                       setFocused(false);
                       setText("");
                     }}

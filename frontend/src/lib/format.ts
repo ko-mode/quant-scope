@@ -160,6 +160,15 @@ export function analyticsRangeLabel(analytics: {
   return `${formatDate(analytics_start)} – ${formatDate(analytics_end)} · ${return_observations} ${noun}`;
 }
 
+/**
+ * Pearson correlation cell formatting for the Phase 3A comparison matrix.
+ * `null` (zero-variance ticker, including its own diagonal) renders as "—",
+ * never `"1.00"` or `"0.00"` - see `CorrelationMatrix` in `api/types`.
+ */
+export function formatCorrelation(value: number | null | undefined): string {
+  return value == null || Number.isNaN(value) ? "—" : value.toFixed(2);
+}
+
 export function emptyStateFor(range: RangeOption): EmptyState {
   if (range === "MAX") {
     return {

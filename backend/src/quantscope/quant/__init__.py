@@ -16,13 +16,18 @@ metadata block to responses.
 Phase 2A implements the single-name analytics: daily simple returns, the
 cumulative wealth index, descriptive return stats, annualised volatility, the
 annualised Sharpe ratio, drawdown analytics, CAPM beta and 1-day historical
-VaR / Expected Shortfall. Numerical conventions and the minimum-observation
-gates live in :mod:`quantscope.quant.conventions` (ADR 0017).
+VaR / Expected Shortfall. Phase 3A adds multi-security comparison: one common
+inner-joined return panel, normalized performance and Pearson correlation
+(:mod:`quantscope.quant.comparison`). Numerical conventions and the
+minimum-observation gates live in :mod:`quantscope.quant.conventions`
+(ADR 0017).
 """
 
 from __future__ import annotations
 
+from quantscope.quant.comparison import ComparisonPanel, compare_securities
 from quantscope.quant.conventions import (
+    MIN_OBS_COMPARISON,
     MIN_OBSERVATIONS,
     STDDEV_DDOF,
     TRADING_DAYS_PER_YEAR,
@@ -53,11 +58,13 @@ from quantscope.quant.risk import (
 
 __all__ = [
     "MIN_OBSERVATIONS",
+    "MIN_OBS_COMPARISON",
     "STDDEV_DDOF",
     "TRADING_DAYS_PER_YEAR",
     "VAR_CONFIDENCE_LEVELS",
     "VAR_ES_HORIZON_DAYS",
     "BetaResult",
+    "ComparisonPanel",
     "DrawdownResult",
     "HistoricalVarEsResult",
     "InsufficientObservations",
@@ -68,6 +75,7 @@ __all__ = [
     "VolatilityResult",
     "annualised_volatility",
     "capm_beta",
+    "compare_securities",
     "cumulative_wealth_index",
     "drawdown_analysis",
     "historical_var_es",

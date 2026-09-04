@@ -247,6 +247,9 @@ src/quantscope/
 │   │                       beta (vs SPY), covariance, correlation
 │   ├── drawdown.py         drawdown series, max drawdown, duration/recovery
 │   ├── performance.py      Sharpe, Sortino, CAGR, tracking error
+│   ├── comparison.py       N-way inner-joined return panel, base-100 normalized
+│   │                       performance (NaT anchor, no return divided away),
+│   │                       Pearson correlation over the one common panel (3A)
 │   ├── factors.py          FF3 OLS regression + HAC (Newey-West) SEs
 │   └── calendar.py         XNYS trading calendar wrapper, session alignment
 ├── logging_setup.py       structured JSON-line logging for CLI jobs
@@ -452,7 +455,7 @@ may report individual metrics as suppressed with a structured reason (§5).
 | `GET /securities/{ticker}/risk?confidence&level` | 1-day historical VaR / ES detail (95% and 99%).              |
 | `GET /securities/{ticker}/fundamentals`         | Revenue, earnings, growth, market cap, P/E, forward P/E, P/S. Each value resolved via the canonical-metric mapping and tagged with `tag`, `period_end`, `filed_date`, `accession_no`; **returned as `unavailable` (with a reason) when no mapped tag is present** - never guessed. |
 | `GET /securities/{ticker}/factors?model=ff3&start&end` | FF3 regression: Mkt-RF / SMB / HML coefficients, HAC standard errors, t-stats, R², n. Response states explicitly that the Mkt-RF coefficient is **not** the SPY CAPM beta. |
-| `POST /compare`                                 | `{tickers[], start, end, window}` -> metrics on one inner-joined panel + correlation matrix + `observations_used`, `aligned_start`, `aligned_end` + shared `assumptions`. |
+| `GET /compare?tickers=A,B,...&start&end&source` | 2-8 distinct tickers -> one N-way inner-joined return panel -> base-100 normalized performance (every aligned return compounded, none divided away) + Pearson correlation matrix + `observations_used`, `aligned_start`, `aligned_end`. Flat provenance fields (no nested `assumptions`). `status`: `ok` / `insufficient_observations` (panel < `MIN_OBS_COMPARISON` = 60) / `unavailable` (any ticker has < 2 persisted bars, lists every offender). Shipped in Phase 3A. |
 
 `/health` (liveness) is served at the root, outside `/api/v1`.
 

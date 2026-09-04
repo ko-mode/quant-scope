@@ -166,3 +166,52 @@ export interface AnalyticsResponse {
   var_es_99: VarEsMetric;
   assumptions: AnalyticsAssumptions;
 }
+
+/**
+ * TypeScript mirror of `backend/src/quantscope/api/comparison_schemas.py`
+ * (Phase 3A `GET /compare`). Unlike `AnalyticsResponse` there is no nested
+ * `assumptions` block - the handful of provenance fields that apply to a
+ * comparison are flat top-level fields instead.
+ */
+export type ComparisonStatus = "ok" | "insufficient_observations" | "unavailable";
+
+/**
+ * Base-100 wealth index. `dates[0]` is always `null` (the pre-return anchor,
+ * not a real market date); `dates.length === series[ticker].length ===
+ * observations_used + 1` for every ticker. Never re-normalize this client
+ * side - it is already the API's chosen convention.
+ */
+export interface NormalizedPerformance {
+  base_value: number;
+  dates: Array<string | null>;
+  series: Record<string, number[]>;
+}
+
+/**
+ * Pearson correlation of the one common aligned-return panel. `matrix[i][j]`
+ * is `null` - never `0` - whenever either `tickers[i]` or `tickers[j]` has
+ * zero return variance over the panel (see `zero_variance_tickers` on the
+ * parent response), including a zero-variance ticker's own diagonal.
+ */
+export interface CorrelationMatrix {
+  tickers: string[];
+  matrix: Array<Array<number | null>>;
+}
+
+export interface ComparisonResponse {
+  status: ComparisonStatus;
+  tickers: string[];
+  source: string;
+  adjustment_basis: "adjusted_close";
+  requested_start: string | null;
+  requested_end: string | null;
+  aligned_start: string | null;
+  aligned_end: string | null;
+  observations_used: number | null;
+  required: number | null;
+  reason: string | null;
+  unavailable_tickers: string[] | null;
+  zero_variance_tickers: string[] | null;
+  normalized_performance: NormalizedPerformance | null;
+  correlation: CorrelationMatrix | null;
+}

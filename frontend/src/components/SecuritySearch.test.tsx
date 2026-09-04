@@ -108,4 +108,59 @@ describe("SecuritySearch", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(push).toHaveBeenCalledWith("/securities/NVDA");
   });
+
+  it("with onSelect, clicking a result calls onSelect instead of navigating", () => {
+    state({
+      isSuccess: true,
+      data: { results: [sec({})], limit: 20, offset: 0, count: 1 },
+    });
+    const onSelect = vi.fn();
+    render(<SecuritySearch variant="bar" onSelect={onSelect} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "nvda" } });
+    fireEvent.click(screen.getByRole("option"));
+    expect(onSelect).toHaveBeenCalledWith(sec({}));
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("with onSelect, Enter over the active result calls onSelect instead of navigating", () => {
+    state({
+      isSuccess: true,
+      data: { results: [sec({})], limit: 20, offset: 0, count: 1 },
+    });
+    const onSelect = vi.fn();
+    render(<SecuritySearch variant="bar" onSelect={onSelect} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "nvda" } });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith(sec({}));
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("excludeTickers hides already-selected securities from the results", () => {
+    state({
+      isSuccess: true,
+      data: {
+        results: [sec({}), sec({ ticker: "MSFT", name: "Microsoft" })],
+        limit: 20,
+        offset: 0,
+        count: 2,
+      },
+    });
+    render(<SecuritySearch variant="bar" excludeTickers={["NVDA"]} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "n" } });
+    expect(screen.queryByText("NVIDIA Corporation")).toBeNull();
+    expect(screen.getByText("Microsoft")).toBeTruthy();
+  });
+
+  it("a custom placeholder overrides the variant default", () => {
+    state({ isSuccess: false, data: undefined });
+    render(<SecuritySearch variant="bar" placeholder="Add security to compare" />);
+    expect(screen.getByPlaceholderText("Add security to compare")).toBeTruthy();
+  });
 });

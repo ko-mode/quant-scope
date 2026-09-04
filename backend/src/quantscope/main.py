@@ -2,8 +2,8 @@
 
 ``GET /health`` is a liveness probe. Phase 1E adds the read-only securities and
 price-history routes under ``/securities``; Phase 2B adds
-``GET /securities/{ticker}/analytics``. All are served at the root like
-``/health``.
+``GET /securities/{ticker}/analytics``; Phase 3A adds ``GET /compare``. All are
+served at the root like ``/health``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from quantscope import __version__
-from quantscope.api.routers import analytics, health, securities
+from quantscope.api.routers import analytics, compare, health, securities
 from quantscope.config import Settings, get_settings
 
 
@@ -36,6 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(securities.router)
     app.include_router(analytics.router)
+    app.include_router(compare.router)
 
     return app
 

@@ -1,11 +1,25 @@
+import type { ReactNode } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("next/link", () => ({
+  default: ({ href, children, ...rest }: { href: string; children: ReactNode }) => (
+    <a href={href} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
 const usePriceHistory = vi.fn();
 const useSecurityAnalytics = vi.fn();
+const useComparison = vi.fn();
+const useSecuritySearch = vi.fn();
 vi.mock("@/lib/api/hooks", () => ({
   usePriceHistory: (...args: unknown[]) => usePriceHistory(...args),
   useSecurityAnalytics: (...args: unknown[]) => useSecurityAnalytics(...args),
+  useComparison: (...args: unknown[]) => useComparison(...args),
+  useSecuritySearch: (...args: unknown[]) => useSecuritySearch(...args),
 }));
 
 import { SecurityTabs } from "./SecurityTabs";
@@ -17,6 +31,8 @@ function idleQuery() {
 beforeEach(() => {
   usePriceHistory.mockReset().mockReturnValue(idleQuery());
   useSecurityAnalytics.mockReset().mockReturnValue(idleQuery());
+  useComparison.mockReset().mockReturnValue(idleQuery());
+  useSecuritySearch.mockReset().mockReturnValue(idleQuery());
 });
 
 describe("SecurityTabs", () => {
@@ -47,14 +63,25 @@ describe("SecurityTabs", () => {
     expect(screen.getByRole("tab", { name: "Price" }).getAttribute("aria-selected")).toBe("true");
   });
 
-  it("Factors, Comparison and Fundamentals are disabled and carry a SOON badge", () => {
+  it("Factors and Fundamentals are disabled and carry a SOON badge", () => {
     render(<SecurityTabs ticker="NVDA" />);
-    for (const label of ["Factors", "Comparison", "Fundamentals"]) {
+    for (const label of ["Factors", "Fundamentals"]) {
       const el = screen.getByText(label).closest("[aria-disabled]");
       expect(el).toBeTruthy();
       expect(el?.tagName).not.toBe("BUTTON");
       expect(el?.querySelector(".qs-tab__soon")?.textContent).toBe("SOON");
     }
+  });
+
+  it("switching to Comparison seeds the ticker set with the current page ticker", () => {
+    render(<SecurityTabs ticker="NVDA" />);
+    fireEvent.click(screen.getByRole("tab", { name: "Comparison" }));
+    expect(screen.getByRole("tab", { name: "Comparison" }).getAttribute("aria-selected")).toBe("true");
+    // Only 1 ticker selected -> useComparison must never be called with >=2 tickers
+    // to fire; it is still invoked (React Query owns the `enabled` gate), so we
+    // only assert the seeded set, not call-count.
+    expect(useComparison).toHaveBeenCalledWith(["NVDA"], "1Y");
+    expect(screen.getByTestId("comparison-empty-state")).toBeTruthy();
   });
 
   it("clicking a SOON tab does nothing (no tab role, stays on the current tab)", () => {

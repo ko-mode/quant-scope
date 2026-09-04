@@ -41,6 +41,14 @@ MIN_OBS_HISTORICAL_ES: Final = 126
 MIN_OBS_FF3_REGRESSION: Final = 250
 """Reserved for the Phase 3 Fama-French regression; not consumed in Phase 2A."""
 
+# --- Multi-security comparison (Phase 3A, ADR 0017 "Multi-security comparison") ---
+MIN_OBS_COMPARISON: Final = MIN_OBS_RETURN_STATS
+"""Gate for the one common aligned-return panel (normalized performance +
+Pearson correlation). Deliberately reuses the basic-statistics threshold - a
+sample correlation coefficient is the same statistical order as a sample
+mean/stdev, not the regression-stability concern that justifies beta/Sharpe's
+stricter 126. Not a new methodology decision."""
+
 MIN_OBSERVATIONS: Final[dict[str, int]] = {
     "return_summary": MIN_OBS_RETURN_STATS,
     "annualised_volatility": MIN_OBS_VOLATILITY,
@@ -49,12 +57,14 @@ MIN_OBSERVATIONS: Final[dict[str, int]] = {
     "capm_beta": MIN_OBS_BETA,
     "historical_var_es": max(MIN_OBS_HISTORICAL_VAR, MIN_OBS_HISTORICAL_ES),
     "ff3_regression": MIN_OBS_FF3_REGRESSION,
+    "comparison": MIN_OBS_COMPARISON,
 }
 """Metric name -> its minimum-observation gate, for a single lookup point."""
 
 __all__ = [
     "MIN_OBSERVATIONS",
     "MIN_OBS_BETA",
+    "MIN_OBS_COMPARISON",
     "MIN_OBS_DRAWDOWN",
     "MIN_OBS_FF3_REGRESSION",
     "MIN_OBS_HISTORICAL_ES",

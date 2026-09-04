@@ -627,6 +627,109 @@ input::placeholder {
   border-top: 1px solid var(--grid);
 }
 
+/* ---- Comparison (Phase 3A) --------------------------------------------- */
+.qs-compare-tickers {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.qs-compare-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.qs-compare-chip__remove {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--fg-faint);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 3px;
+}
+.qs-compare-chip__remove:hover {
+  color: var(--fg);
+}
+.qs-compare-add {
+  min-width: 220px;
+}
+.qs-compare-add .qs-search--bar {
+  width: 220px;
+}
+.qs-compare-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 8px 10px 2px;
+}
+.qs-compare-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.qs-compare-legend__swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.qs-corr {
+  margin-top: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px 16px 16px;
+}
+.qs-corr__title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin-bottom: 10px;
+}
+.qs-corr-table {
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.qs-corr-table th,
+.qs-corr-table td {
+  padding: 6px 12px;
+  text-align: right;
+  border-bottom: 1px solid var(--grid);
+}
+.qs-corr-table th {
+  color: var(--fg-muted);
+  font-weight: 600;
+  text-align: right;
+}
+.qs-corr-table th:first-child,
+.qs-corr-table td:first-child {
+  text-align: left;
+  color: var(--fg-2);
+}
+.qs-corr-table__diag {
+  color: var(--fg-faint);
+}
+.qs-corr__note {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
 /* ---- 404 / error ----------------------------------------------------- */
 .qs-notfound {
   padding: 90px 24px;
