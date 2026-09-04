@@ -105,6 +105,61 @@ export interface EmptyState {
  * there is nothing at all, while an empty narrower range only tells us there is
  * nothing *in that window* - the copy must not claim history exists elsewhere.
  */
+/**
+ * Percent formatting for analytics fields (return, volatility, drawdown,
+ * VaR / ES). Purely presentational: multiplies the backend's decimal fraction
+ * by 100 and fixes the decimals - it does not alter magnitude or sign. The
+ * backend reports VaR / ES as **positive loss magnitudes** (ADR 0017); this
+ * function never flips or reinterprets a sign, it only formats whatever
+ * number it is given.
+ */
+export function formatPercent(value: number | null | undefined, decimals = 2): string {
+  return value == null || Number.isNaN(value) ? "—" : `${(value * 100).toFixed(decimals)}%`;
+}
+
+/** Plain fixed-decimal formatting for ratio metrics (Sharpe, beta, r-squared). */
+export function formatRatio(value: number | null | undefined, decimals = 2): string {
+  return value == null || Number.isNaN(value) ? "—" : value.toFixed(decimals);
+}
+
+/** "52 / 126 observations" for an `insufficient_observations` metric. */
+export function observationsFraction(
+  used: number | null | undefined,
+  required: number | null | undefined,
+): string {
+  if (used == null || required == null) return "";
+  return `${used} / ${required} observations`;
+}
+
+/**
+ * Human label for a metric's `reason` when `status === "unavailable"`. Known
+ * codes come from `quantscope.services.analytics`; an unrecognised code (e.g.
+ * a future addition) falls back to a de-slugged version rather than hiding it.
+ */
+const UNAVAILABLE_REASON_LABEL: Record<string, string> = {
+  risk_free_series_not_ingested: "RF not ingested",
+  benchmark_security_not_found: "SPY benchmark unavailable",
+  benchmark_price_history_unavailable: "Benchmark history unavailable",
+};
+
+export function unavailableReasonLabel(reason: string | null | undefined): string {
+  if (!reason) return "Unavailable";
+  return UNAVAILABLE_REASON_LABEL[reason] ?? reason.replaceAll("_", " ");
+}
+
+/** "Jun 10, 2021 – Jun 9, 2025 · 1,006 observations" (or just the count when
+ * no return series could be formed - `analytics_start`/`end` are then `null`). */
+export function analyticsRangeLabel(analytics: {
+  analytics_start: string | null;
+  analytics_end: string | null;
+  return_observations: number;
+}): string {
+  const { analytics_start, analytics_end, return_observations } = analytics;
+  const noun = return_observations === 1 ? "observation" : "observations";
+  if (!analytics_start || !analytics_end) return `${return_observations} ${noun}`;
+  return `${formatDate(analytics_start)} – ${formatDate(analytics_end)} · ${return_observations} ${noun}`;
+}
+
 export function emptyStateFor(range: RangeOption): EmptyState {
   if (range === "MAX") {
     return {

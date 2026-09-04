@@ -2,13 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import type { PriceBar } from "./api/types";
 import {
+  analyticsRangeLabel,
   assetTypeLabel,
   emptyStateFor,
   formatAxisDate,
+  formatPercent,
+  formatRatio,
+  observationsFraction,
   rangeToParams,
   securityHref,
   statusLabel,
   toPriceSeries,
+  unavailableReasonLabel,
 } from "./format";
 
 const bar = (over: Partial<PriceBar>): PriceBar => ({
@@ -78,6 +83,83 @@ describe("assetTypeLabel / statusLabel", () => {
 describe("formatAxisDate", () => {
   it("renders a compact month-year label", () => {
     expect(formatAxisDate("2024-06-10")).toBe("Jun '24");
+  });
+});
+
+describe("formatPercent", () => {
+  it("multiplies by 100 and fixes decimals, without altering sign", () => {
+    expect(formatPercent(0.184)).toBe("18.40%");
+    expect(formatPercent(-0.221)).toBe("-22.10%");
+    expect(formatPercent(0)).toBe("0.00%");
+  });
+
+  it("preserves the backend's positive-loss VaR convention (no sign flip)", () => {
+    // ADR 0017: VaR/ES are positive loss magnitudes - formatting must not negate them.
+    expect(formatPercent(0.0416)).toBe("4.16%");
+  });
+
+  it("renders null/undefined/NaN as an em dash", () => {
+    expect(formatPercent(null)).toBe("—");
+    expect(formatPercent(undefined)).toBe("—");
+    expect(formatPercent(Number.NaN)).toBe("—");
+  });
+});
+
+describe("formatRatio", () => {
+  it("fixes decimals for ratio metrics (Sharpe, beta)", () => {
+    expect(formatRatio(1.4231)).toBe("1.42");
+    expect(formatRatio(-0.5)).toBe("-0.50");
+  });
+
+  it("renders null as an em dash", () => {
+    expect(formatRatio(null)).toBe("—");
+  });
+});
+
+describe("observationsFraction", () => {
+  it("renders 'used / required observations'", () => {
+    expect(observationsFraction(52, 126)).toBe("52 / 126 observations");
+  });
+
+  it("renders nothing when either value is missing", () => {
+    expect(observationsFraction(null, 126)).toBe("");
+    expect(observationsFraction(52, null)).toBe("");
+  });
+});
+
+describe("unavailableReasonLabel", () => {
+  it("maps known reason codes to a short human label", () => {
+    expect(unavailableReasonLabel("risk_free_series_not_ingested")).toBe("RF not ingested");
+    expect(unavailableReasonLabel("benchmark_security_not_found")).toBe("SPY benchmark unavailable");
+    expect(unavailableReasonLabel("benchmark_price_history_unavailable")).toBe(
+      "Benchmark history unavailable",
+    );
+  });
+
+  it("de-slugs an unrecognised code rather than hiding it", () => {
+    expect(unavailableReasonLabel("some_future_reason")).toBe("some future reason");
+  });
+
+  it("falls back to a generic label when there is no reason", () => {
+    expect(unavailableReasonLabel(null)).toBe("Unavailable");
+  });
+});
+
+describe("analyticsRangeLabel", () => {
+  it("renders the return-observation date span and count", () => {
+    expect(
+      analyticsRangeLabel({
+        analytics_start: "2022-01-04",
+        analytics_end: "2022-12-30",
+        return_observations: 204,
+      }),
+    ).toBe("Jan 4, 2022 – Dec 30, 2022 · 204 observations");
+  });
+
+  it("renders just the count when no return series could be formed", () => {
+    expect(
+      analyticsRangeLabel({ analytics_start: null, analytics_end: null, return_observations: 0 }),
+    ).toBe("0 observations");
   });
 });
 

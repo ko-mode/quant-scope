@@ -50,3 +50,119 @@ export interface PriceHistoryResponse {
   count: number;
   results: PriceBar[];
 }
+
+/**
+ * TypeScript mirror of `backend/src/quantscope/api/analytics_schemas.py`
+ * (Phase 2B / 2B.1). Every metric is a flat, discriminated object: value
+ * fields are populated only when `status === "ok"`; otherwise they are
+ * `null` and the suppression fields (`required` / `observations_used` /
+ * `reason`) carry the explanation. Never coerce a non-`"ok"` metric's value
+ * to `0` - render its `status` instead.
+ */
+export type MetricStatus = "ok" | "insufficient_observations" | "undefined" | "unavailable";
+
+export interface MetricBase {
+  status: MetricStatus;
+  observations_used: number | null;
+  required: number | null;
+  reason: string | null;
+}
+
+export interface ReturnSummaryMetric extends MetricBase {
+  mean_daily_return: number | null;
+  stdev_daily_return: number | null;
+  cumulative_return: number | null;
+  min_daily_return: number | null;
+  max_daily_return: number | null;
+}
+
+export interface VolatilityMetric extends MetricBase {
+  daily_volatility: number | null;
+  annualised_volatility: number | null;
+  trading_days_per_year: number | null;
+}
+
+export interface SharpeMetric extends MetricBase {
+  sharpe_ratio: number | null;
+  mean_daily_excess_return: number | null;
+  daily_excess_volatility: number | null;
+  trading_days_per_year: number | null;
+  risk_free_basis: string | null;
+}
+
+export interface DrawdownMetric extends MetricBase {
+  max_drawdown: number | null;
+  peak_date: string | null;
+  trough_date: string | null;
+  recovery_date: string | null;
+  recovered: boolean | null;
+}
+
+export interface BetaMetric extends MetricBase {
+  beta: number | null;
+  alpha_daily: number | null;
+  r_squared: number | null;
+  aligned_start: string | null;
+  aligned_end: string | null;
+}
+
+export interface VarEsMetric extends MetricBase {
+  confidence: number | null;
+  var: number | null;
+  expected_shortfall: number | null;
+  threshold_return: number | null;
+  tail_observations: number | null;
+  horizon_days: number | null;
+  method: string | null;
+}
+
+/** One entry in `assumptions.suppressed` - why a metric is not `"ok"`. */
+export interface SuppressedMetric {
+  metric: string;
+  status: MetricStatus;
+  required: number | null;
+  observations_used: number | null;
+  reason: string | null;
+}
+
+/** ADR 0005 methodology block. Prefer these fields over hard-coded prose. */
+export interface AnalyticsAssumptions {
+  as_of: string | null;
+  calendar: "XNYS";
+  annualisation_factor: number;
+  return_type: "total";
+  adjustment_basis: "adjusted_close";
+  data_source: string;
+  missing_data_policy: string;
+  rf_source: string;
+  rf: number | null;
+  rf_basis: string | null;
+  benchmark: string;
+  market_proxy: string;
+  var_horizon_days: number;
+  var_scaling: "none";
+  confidence_levels: number[];
+  min_observations: Record<string, number>;
+  sharpe_annualisation_note: string;
+  suppressed: SuppressedMetric[];
+}
+
+export interface AnalyticsResponse {
+  ticker: string;
+  source: string;
+  adjustment_basis: "adjusted_close";
+  requested_start: string | null;
+  requested_end: string | null;
+  price_observations: number;
+  return_observations: number;
+  analytics_start: string | null;
+  analytics_end: string | null;
+  return_summary: ReturnSummaryMetric;
+  volatility: VolatilityMetric;
+  sharpe: SharpeMetric;
+  drawdown: DrawdownMetric;
+  beta: BetaMetric;
+  var_es_95: VarEsMetric;
+  var_es_99: VarEsMetric;
+  assumptions: AnalyticsAssumptions;
+}

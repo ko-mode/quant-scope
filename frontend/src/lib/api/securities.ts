@@ -5,7 +5,12 @@
  */
 
 import { apiFetch } from "./client";
-import type { PriceHistoryResponse, SecurityListResponse, SecurityRead } from "./types";
+import type {
+  AnalyticsResponse,
+  PriceHistoryResponse,
+  SecurityListResponse,
+  SecurityRead,
+} from "./types";
 
 /** Rows requested for the price chart - the API's own maximum, so `MAX` is never truncated. */
 export const PRICE_ROW_LIMIT = 20_000;
@@ -59,6 +64,28 @@ export function getSecurityPrices(
 ): Promise<PriceHistoryResponse> {
   return apiFetch<PriceHistoryResponse>(
     `/securities/${encodeURIComponent(ticker)}/prices${query({ start, end, source, limit })}`,
+    init,
+  );
+}
+
+export interface AnalyticsQuery {
+  start?: string;
+  end?: string;
+  source?: string;
+  init?: RequestInit;
+}
+
+/**
+ * Deterministic single-name analytics (Phase 2B / 2B.1). Same `start`/`end`
+ * semantics as `getSecurityPrices`: omit both for the full persisted history.
+ * The frontend never computes any of this - it only requests and renders it.
+ */
+export function getSecurityAnalytics(
+  ticker: string,
+  { start, end, source, init }: AnalyticsQuery = {},
+): Promise<AnalyticsResponse> {
+  return apiFetch<AnalyticsResponse>(
+    `/securities/${encodeURIComponent(ticker)}/analytics${query({ start, end, source })}`,
     init,
   );
 }

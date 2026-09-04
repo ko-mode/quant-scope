@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "./client";
-import { getSecurity, getSecurityPrices, searchSecurities } from "./securities";
+import { getSecurity, getSecurityAnalytics, getSecurityPrices, searchSecurities } from "./securities";
 
 function mockJson(body: unknown, ok = true, status = 200) {
   return vi.fn(async () => ({
@@ -61,6 +61,33 @@ describe("securities API client", () => {
     expect(url).toContain("end=2024-12-31");
     expect(url).toContain("source=stooq");
     expect(url).toContain("limit=20000");
+  });
+
+  it("getSecurityAnalytics forwards start / end / source for a bounded range", async () => {
+    const fetchMock = mockJson({ ticker: "NVDA", source: "tiingo" });
+    vi.stubGlobal("fetch", fetchMock);
+    await getSecurityAnalytics("NVDA", { start: "2024-01-01", end: "2024-12-31", source: "stooq" });
+    const url = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(url).toContain("/securities/NVDA/analytics?");
+    expect(url).toContain("start=2024-01-01");
+    expect(url).toContain("end=2024-12-31");
+    expect(url).toContain("source=stooq");
+  });
+
+  it("getSecurityAnalytics sends no query string for MAX (no start/end)", async () => {
+    const fetchMock = mockJson({ ticker: "NVDA", source: "tiingo" });
+    vi.stubGlobal("fetch", fetchMock);
+    await getSecurityAnalytics("NVDA", {});
+    const url = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(url).toBe("http://localhost:8000/securities/NVDA/analytics");
+  });
+
+  it("getSecurityAnalytics URL-encodes the ticker like the other endpoints", async () => {
+    const fetchMock = mockJson({ ticker: "BRK.B", source: "tiingo" });
+    vi.stubGlobal("fetch", fetchMock);
+    await getSecurityAnalytics("brk.b");
+    const url = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(url).toBe("http://localhost:8000/securities/brk.b/analytics");
   });
 
   it("raises ApiError carrying the FastAPI detail on a non-ok response", async () => {

@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { PricePanel } from "@/components/PricePanel";
 import { SecurityHeader } from "@/components/SecurityHeader";
+import { SecurityTabs } from "@/components/SecurityTabs";
 import { isNotFound } from "@/lib/api/client";
 import { getSecurity } from "@/lib/api/securities";
 import type { SecurityRead } from "@/lib/api/types";
@@ -28,7 +28,7 @@ export default async function SecurityPage({
         ← All securities
       </Link>
       <SecurityHeader security={security} />
-      <PricePanel ticker={security.ticker} />
+      <SecurityTabs ticker={security.ticker} />
     </main>
   );
 }
