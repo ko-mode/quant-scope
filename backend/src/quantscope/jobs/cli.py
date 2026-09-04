@@ -1,7 +1,7 @@
 """``quantscope`` CLI - data operations.
 
-Phase 1B provides ``seed-securities``; Phase 1D adds ``ingest-prices``. Factor /
-fundamentals ingestion commands are added in later phases.
+Phase 1B provides ``seed-securities``; Phase 1D adds ``ingest-prices``;
+Phase 2B.1 adds ``ingest-factors`` (Kenneth French daily FF3 + RF).
 """
 
 from __future__ import annotations
@@ -15,12 +15,13 @@ from typing import Annotated
 import typer
 
 from quantscope.config import get_settings
+from quantscope.data.factor_ingest import build_factor_provider, run_factor_ingestion
 from quantscope.data.ingest import (
     SecurityNotFoundError,
     build_price_provider,
     run_price_ingestion,
 )
-from quantscope.data.providers.base import PriceProviderError
+from quantscope.data.providers.base import FactorProviderError, PriceProviderError
 from quantscope.data.providers.sec_edgar import SecEdgarSecurityProvider
 from quantscope.data.security_seed import run_security_seed
 from quantscope.db.session import SessionLocal
@@ -123,6 +124,58 @@ def ingest_prices(
             )
     except (PriceProviderError, SecurityNotFoundError) as exc:
         typer.echo(json.dumps({"status": "failed", "ticker": ticker, "error": str(exc)}))
+        raise typer.Exit(1) from exc
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    typer.echo(json.dumps(report.as_dict(), default=str))
+    raise typer.Exit(0 if report.status != "failed" else 1)
+
+
+@app.command("ingest-factors")
+def ingest_factors(
+    source_file: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Read a locally downloaded FF3-daily ZIP or CSV instead of fetching.",
+        ),
+    ] = None,
+    start: Annotated[
+        str | None, typer.Option(help="Trim to this inclusive start date, YYYY-MM-DD.")
+    ] = None,
+    end: Annotated[
+        str | None, typer.Option(help="Trim to this inclusive end date, YYYY-MM-DD.")
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(help="Fetch, parse and validate only; write nothing and record no run."),
+    ] = False,
+    verbose: Annotated[bool, typer.Option(help="Log at DEBUG.")] = False,
+) -> None:
+    """Fetch -> parse -> normalise -> validate -> persist the Kenneth French daily FF3 + RF."""
+    configure_json_logging(logging.DEBUG if verbose else logging.INFO)
+    settings = get_settings()
+
+    try:
+        start_date = date.fromisoformat(start) if start else None
+        end_date = date.fromisoformat(end) if end else None
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    provider = build_factor_provider(settings, source_file=source_file)
+
+    try:
+        with SessionLocal() as session:
+            report = run_factor_ingestion(
+                session, provider, start=start_date, end=end_date, dry_run=dry_run
+            )
+    except FactorProviderError as exc:
+        typer.echo(
+            json.dumps({"status": "failed", "source": provider.source_name, "error": str(exc)})
+        )
         raise typer.Exit(1) from exc
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

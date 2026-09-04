@@ -69,6 +69,12 @@ ingest-demo *ARGS:
         uv run quantscope ingest-prices "$t" --start 2005-01-01 {{ARGS}} || rc=1; \
     done; exit $rc
 
+# Ingest the Kenneth French daily Fama/French 3 factors + RF into `factor_return`.
+# One HTTP fetch of the whole history; idempotent. `just ingest-factors -- --start 2005-01-01`
+# to trim, or `-- --source-file path/to.zip` for an offline copy.
+ingest-factors *ARGS:
+    cd backend && uv run quantscope ingest-factors {{ARGS}}
+
 # Everything CI runs except Docker image builds
 check: lint typecheck import-boundaries test
     cd frontend && pnpm test

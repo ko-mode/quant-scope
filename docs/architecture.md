@@ -167,7 +167,7 @@ It must **not** import: `quantscope.api`, `quantscope.services`,
 * **No custom DataFrame wrapper classes** created solely to satisfy static
   typing.
 
-### Analytics service flow (Phase 2B)
+### Analytics service flow (Phase 2B / 2B.1)
 
 `GET /securities/{ticker}/analytics` is the first route with a real service
 layer (`quantscope.services.analytics`). The flow is strictly one-directional:
@@ -180,8 +180,24 @@ router: resolve ticker (404) · reject start>end (422) · resolve source
         -> quant.simple_returns(prices)          # called ONCE, reused
         -> quant.return_summary / annualised_volatility / drawdown_analysis /
            historical_var_es(0.95) / historical_var_es(0.99)
+        -> _load_daily_risk_free(session, start, end)   # db.repositories.factors.get_factor_series(rf)
+        -> quant.sharpe_ratio(returns, risk_free_daily=rf)
+        -> [SPY security -> SPY price bars -> quant.simple_returns] -> quant.capm_beta(returns, spy_returns, rf)
         -> map each result dataclass -> its Pydantic metric model
         -> assemble the ADR 0005 `assumptions` block
+```
+
+Equivalently, the ingestion side that feeds `_load_daily_risk_free`:
+
+```
+Kenneth French daily FF3 (ZIP -> CSV)
+      -> KennethFrenchDailyFactorProvider / parse_ff_daily_factors   (structural header detection)
+      -> normalize_factor_returns   (percent -> decimal, sentinel rejection)
+      -> FACTOR_RETURN_SCHEMA (Pandera)   (structural checks + unit-confusion tripwire)
+      -> factor_return   (idempotent upsert, one source: "kenneth_french")
+      -> services.analytics._load_daily_risk_free
+            |__ sharpe_ratio(returns, rf)
+            |__ capm_beta(asset_returns, spy_returns, rf)
 ```
 
 * **Deterministic.** No clock is read; `assumptions.as_of` is the last daily
@@ -191,13 +207,23 @@ router: resolve ticker (404) · reject start>end (422) · resolve source
   (`ok` / `insufficient_observations` / `undefined` / `unavailable`); a security
   with `< 2` bars returns all-suppressed with HTTP 200. One metric is never
   allowed to fail the response.
-* **Risk-free rate.** ADR 0017 defines Sharpe and CAPM beta against the Ken
-  French daily `RF` series (ADR 0013), stored in `factor_return`. That table and
-  its ingestion arrive with **migration M2**. Until then the service's
-  `_load_daily_risk_free` reader returns `None`, and **both Sharpe and CAPM beta
-  are reported `status: "unavailable"`, `reason: "risk_free_series_not_ingested"`**
-  - no constant or zero RF is ever substituted (ADR 0013 rejected that). M2
-  replaces that one reader and the two metrics light up with no route change.
+* **Risk-free rate (implemented, Phase 2B.1).** ADR 0017 defines Sharpe and CAPM
+  beta against the Ken French daily `RF` series (ADR 0013), persisted in
+  `factor_return` (`factor_name='rf'`, `source='kenneth_french'`) by
+  `just ingest-factors` / migration `0003_factor_return`. `_load_daily_risk_free`
+  reads it; `None` only when nothing is persisted for the window, in which case
+  Sharpe **and** CAPM beta report `status: "unavailable"`,
+  `reason: "risk_free_series_not_ingested"` - no constant or zero RF is ever
+  substituted (ADR 0013). CAPM beta additionally reports `unavailable` with
+  `benchmark_security_not_found` / `benchmark_price_history_unavailable` when
+  SPY itself (same price source as the asset) is missing or too short - a
+  missing benchmark never fails the other metrics. The engine
+  (`sharpe_ratio` / `capm_beta`) owns all date alignment; the service passes
+  raw asset / SPY / RF series and never pre-joins them.
+* **Same factor infrastructure will carry Phase 3B.** `factor_return` also
+  holds `mkt_rf`, `smb`, `hml` (not yet read by any service) and
+  `get_factor_panel` returns all four together - the FF3 regression endpoint
+  reuses this table and reader pattern without a schema change.
 * **No pandas in the router.** SQL stays in the repository; the router owns only
   HTTP status codes.
 
@@ -381,14 +407,14 @@ lists and the rationale for what is intentionally *absent* are in
 |-----------------------|-----------------------------------------------------|--------------------------------------------|
 | `security`            | Reference data for the searchable US-equity universe, seeded from SEC (ADR 0021). Internal `id` PK; **all FKs reference `security_id`, never `ticker`**. `exchange` is a MIC-style code **normalised from the SEC exchange label** (single-source, not verified listing metadata); V1 is exchange-listed only (OTC excluded). `asset_type` / `cik` are **nullable** - set only when reliably determinable, never guessed. | -                                          |
 | `price_bar`           | Daily OHLCV per security. Both raw `close` and vendor `adj_close` stored. | `source`, `ingested_at`; PK `(security_id, trade_date, source)` |
-| `factor_return`       | Daily Fama-French factor returns, including `rf`. `frequency` column keeps monthly factors possible later. | `source`, `ingested_at`; PK `(factor_name, frequency, trade_date, source)` |
+| `factor_return`       | Daily Fama-French factor returns (`mkt_rf`, `smb`, `hml`, `rf`), decimal daily returns (source percent / 100). `frequency` column keeps monthly factors possible later. No FK to `security` - factors are market-wide. | `source` (`kenneth_french`), `ingested_at`; PK `(factor_name, frequency, trade_date, source)` |
 | `fundamental_fact`    | Point-in-time company facts from SEC EDGAR. Restatements inserted as new rows; resolved metrics record which tag/accession they used. | `filed_date` (mandatory), `accession_no`, `form`, `taxonomy`, `tag`, `unit`, `source`, `ingested_at` |
 | `data_ingestion_run`  | Audit row per ingestion invocation (status, rows, error, time range). | is the provenance record                   |
 
 Migration order: **0001** `security`, `price_bar`, `data_ingestion_run`,
 `pg_trgm` (Phase 1A) -> **0002** `security.asset_type` nullable (Phase 1B,
-ADR 0021) -> **M2** `factor_return` (Phase 2) -> **M3** `fundamental_fact`
-(Phase 3).
+ADR 0021) -> **0003 (M2)** `factor_return` (Phase 2B.1, *complete*) -> **M3**
+`fundamental_fact` (Phase 3).
 
 ---
 
@@ -410,18 +436,19 @@ may report individual metrics as suppressed with a structured reason (§5).
 > **adjusted-close** bars for the window, derives daily simple returns once, and
 > runs the pure Phase 2A engine. Each metric object carries a `status`
 > (`ok` / `insufficient_observations` / `undefined` / `unavailable`); one
-> unavailable metric never fails the response. **Sharpe and CAPM beta return
-> `unavailable` until Ken French `RF` is ingested (M2)** - see §5. Metric
-> numbers are `float` end to end, so they serialise as JSON numbers. No
-> `benchmark` / `window` query params: beta is always vs SPY, and the window is
-> plain `start`/`end` dates.
+> unavailable metric never fails the response. **Phase 2B.1 wires Sharpe and
+> CAPM beta to the persisted Kenneth French daily `RF`** (migration `0003`,
+> `just ingest-factors`); they report `unavailable` only when RF (or, for beta,
+> SPY) is genuinely not persisted - see §5. Metric numbers are `float` end to
+> end, so they serialise as JSON numbers. No `benchmark` / `window` query
+> params: beta is always vs SPY, and the window is plain `start`/`end` dates.
 
 | Method & path                                   | Purpose                                                        |
 |-------------------------------------------------|---------------------------------------------------------------|
 | `GET /securities?query=`                        | Search the seeded universe (trigram on ticker + name).        |
 | `GET /securities/{ticker}`                      | Security profile.                                             |
 | `GET /securities/{ticker}/prices?start&end`     | Historical daily bars.                                        |
-| `GET /securities/{ticker}/analytics?start&end&source` | Return summary / volatility / Sharpe / max drawdown / CAPM beta (vs SPY) / 1-day historical VaR & ES at 95% and 99% + `assumptions`. One source, adjusted close, per-metric `status`. Sharpe & beta `unavailable` until M2 (RF). Shipped in Phase 2B. |
+| `GET /securities/{ticker}/analytics?start&end&source` | Return summary / volatility / Sharpe / max drawdown / CAPM beta (vs SPY) / 1-day historical VaR & ES at 95% and 99% + `assumptions`. One source, adjusted close, per-metric `status`. Sharpe & beta read the persisted Kenneth French `RF` (Phase 2B.1); `unavailable` only when RF (or SPY, for beta) is not persisted. Shipped in Phase 2B / 2B.1. |
 | `GET /securities/{ticker}/risk?confidence&level` | 1-day historical VaR / ES detail (95% and 99%).              |
 | `GET /securities/{ticker}/fundamentals`         | Revenue, earnings, growth, market cap, P/E, forward P/E, P/S. Each value resolved via the canonical-metric mapping and tagged with `tag`, `period_end`, `filed_date`, `accession_no`; **returned as `unavailable` (with a reason) when no mapped tag is present** - never guessed. |
 | `GET /securities/{ticker}/factors?model=ff3&start&end` | FF3 regression: Mkt-RF / SMB / HML coefficients, HAC standard errors, t-stats, R², n. Response states explicitly that the Mkt-RF coefficient is **not** the SPY CAPM beta. |
@@ -532,16 +559,28 @@ Delivered in sub-phases.
   performance,frames}` with golden-value + edge-case tests; centralised
   observation thresholds (60/126/250) with structured `InsufficientObservations`
   / `UndefinedResult`; CI-enforced pure boundary.
-- **2B** *(this phase)* - `quantscope.services.analytics` +
+- **2B** *(complete)* - `quantscope.services.analytics` +
   `GET /securities/{ticker}/analytics`: return summary, annualised volatility,
   max-drawdown summary, 1-day historical VaR/ES at 95% and 99%, plus the ADR
   0005 `assumptions` block, all from persisted adjusted-close bars for one
-  source. **Sharpe and CAPM beta are wired but `unavailable`** pending the RF
-  series. No migration. No frontend.
-- **M2 + later 2** - Ken French daily factor ingestion (provides `RF`); `SPY`
-  ingested as benchmark; Sharpe and CAPM beta become `ok`; rolling series +
+  source. Sharpe and CAPM beta wired but reported `unavailable` (no RF ingested
+  yet). No migration. No frontend.
+- **2B.1** *(complete)* - **migration `0003_factor_return`** (ADR 0009: `mkt_rf`
+  / `smb` / `hml` / `rf`, decimal daily returns, PK
+  `(factor_name, frequency, trade_date, source)`, no FK to `security`);
+  `quantscope.data.providers.french_factors` (structural CSV parsing) +
+  `quantscope.data.factors` (percent -> decimal, sentinel rejection, the
+  `abs(value) < 0.5` unit-confusion tripwire) + `quantscope.data.factor_ingest`
+  + `db.repositories.factors`, idempotent, `quantscope ingest-factors` /
+  `just ingest-factors`. `services.analytics._load_daily_risk_free` now reads
+  real `RF`; **Sharpe and CAPM beta become `ok`** whenever RF (and, for beta,
+  SPY) is persisted with enough overlap - `insufficient_observations` /
+  `undefined` / `unavailable` otherwise, per ADR 0017 / ADR 0013. No frontend;
+  no FF3 regression yet.
+- **M2 + Phase 3B** - FF3 regression (Mkt-RF/SMB/HML OLS + Newey-West HAC),
+  reusing `factor_return` and `get_factor_panel` as-is; rolling series +
   drawdown time-series endpoints. Frontend: metrics panel, rolling and drawdown
-  charts. **Migration M2.**
+  charts.
 
 ### Phase 3 - Comparison, correlation, fundamentals, factor regression
 SEC EDGAR fundamentals ingestion (`filed_date`, `accession_no`);

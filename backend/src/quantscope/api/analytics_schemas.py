@@ -15,11 +15,11 @@ one - deliberately no generic envelope hierarchy.
   gate (ADR 0017); ``required`` / ``observations_used`` are set.
 * ``undefined`` - enough data, but the statistic is undefined (zero-variance
   denominator); ``reason`` is set.
-* ``unavailable`` - a required *input series* is not persisted at all. In
-  Phase 2B this is Sharpe and CAPM beta, which ADR 0017 defines against the
-  Ken French daily ``RF`` series that ADR 0013 stores in ``factor_return`` - a
-  table that does not exist until migration M2. No constant/zero RF is
-  substituted (ADR 0013 rejected that).
+* ``unavailable`` - a required *input series* is not persisted. Sharpe / CAPM
+  beta need the Kenneth French daily ``RF`` series (ADR 0013); beta also needs
+  SPY price history for the requested source. When any of those is missing the
+  metric is ``unavailable`` with a ``reason`` - never a constant/zero RF
+  (ADR 0013 rejected that).
 
 Metric numbers are ``float`` end to end (the quant engine's precision), so they
 serialise as JSON numbers and OpenAPI describes them as ``number``.
@@ -114,6 +114,7 @@ class AnalyticsAssumptions(BaseModel):
     missing_data_policy: str
     rf_source: str
     rf: float | None
+    rf_basis: str | None = None
     benchmark: str
     market_proxy: str
     var_horizon_days: int

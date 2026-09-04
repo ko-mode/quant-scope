@@ -1,10 +1,16 @@
-"""PostgreSQL-backed tests for the Phase 2B analytics API.
+"""PostgreSQL-backed tests for the Phase 2B / 2B.1 analytics API.
 
 Skipped unless ``QUANTSCOPE_TEST_DATABASE_URL`` is set (see conftest). Data is
-synthetic - ``PriceBar`` rows inserted straight into the migrated schema. These
-tests exercise the *wiring* (provenance, date windows, adjusted-close basis,
-partial-metric availability, serialization); the statistical correctness of each
-metric is covered by the Phase 2A engine unit tests and is not repeated here.
+synthetic - ``PriceBar`` / ``FactorReturn`` rows inserted straight into the
+migrated schema. These tests exercise the *wiring* (provenance, date windows,
+adjusted-close basis, partial-metric availability, serialization, the RF /
+SPY failure ladder); the statistical correctness of each metric is covered by
+the Phase 2A engine unit tests and is not repeated here.
+
+A single constant RF value is used throughout (``_RF_VALUE``): it keeps the
+"excess return is exactly constant" edge cases (Sharpe/beta ``undefined``)
+exact, while leaving every metric driven by a genuinely varying series (NVDA,
+SPY, SHORTY) unaffected.
 """
 
 from __future__ import annotations
@@ -18,18 +24,22 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from quantscope.db.models import PriceBar, Security
+from quantscope.db.models import FactorReturn, PriceBar, Security
 
-# A deterministic, non-degenerate daily-return pattern: mixed signs (a VaR tail),
-# net drift up, and enough wobble for a real drawdown-and-recovery.
+# Deterministic, non-degenerate daily-return patterns: mixed signs (a VaR tail),
+# net drift, enough wobble for a real drawdown-and-recovery. NVDA and SPY use
+# different patterns so beta is a genuine (not trivially perfect) regression.
 _R_PATTERN = [0.010, -0.008, 0.006, -0.011, 0.009, 0.004, -0.013, 0.012]
+_SPY_PATTERN = [0.005, -0.003, 0.002, 0.004, -0.006, 0.001, 0.003, -0.002]
 _START = "2022-01-03"
+_RF_VALUE = Decimal("0.000080")  # ~2%/yr, constant - see module docstring
+_RF_SOURCE = "kenneth_french"
 
 
-def _adj_path(n: int, base: float = 100.0) -> list[float]:
+def _adj_path(n: int, *, base: float = 100.0, pattern: list[float] = _R_PATTERN) -> list[float]:
     path = [base]
     for i in range(1, n):
-        path.append(round(path[-1] * (1.0 + _R_PATTERN[(i - 1) % len(_R_PATTERN)]), 6))
+        path.append(round(path[-1] * (1.0 + pattern[(i - 1) % len(pattern)]), 6))
     return path
 
 
@@ -51,11 +61,13 @@ def _insert_bars(
     n: int,
     *,
     raw_close: Decimal | None = None,
+    adj_values: list[float] | None = None,
 ) -> list[datetime.date]:
-    """Insert ``n`` daily bars. ``adj_close`` follows ``_adj_path``; ``close`` is a
-    flat sentinel by default so a test can prove analytics use ``adj_close``."""
+    """Insert ``n`` daily bars. ``adj_close`` follows ``adj_values`` (default: the
+    NVDA pattern); ``close`` is a flat sentinel by default so a test can prove
+    analytics use ``adj_close``."""
     dates = _bdates(n)
-    adj = _adj_path(n)
+    adj = adj_values if adj_values is not None else _adj_path(n)
     for day, value in zip(dates, adj, strict=True):
         session.add(
             PriceBar(
@@ -70,20 +82,45 @@ def _insert_bars(
     return dates
 
 
+def _insert_rf(
+    session: Session,
+    dates: list[datetime.date],
+    *,
+    value: Decimal = _RF_VALUE,
+    source: str = _RF_SOURCE,
+) -> None:
+    for day in dates:
+        session.add(
+            FactorReturn(
+                factor_name="rf", frequency="daily", trade_date=day, source=source, value=value
+            )
+        )
+    session.flush()
+
+
 @pytest.fixture
 def universe(session: Session) -> dict[str, Any]:
+    """NVDA (204 returns) + SPY (204 returns, a different pattern) + RF, all
+    covering the same 205-day window; SHORTY and ONEBAR share the window's start
+    but are too short for their own metrics regardless of RF/SPY availability."""
     nvda = _sec(session, "NVDA", "NVIDIA Corporation")
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
     shorty = _sec(session, "SHORTY", "Short History Inc.")
     onebar = _sec(session, "ONEBAR", "Single Bar Corp.")
 
     nvda_dates = _insert_bars(session, nvda, "tiingo", 205)
     _insert_bars(session, nvda, "stooq", 5)  # a second source, never merged
-    _insert_bars(session, shorty, "tiingo", 80)  # >= vol/dd gate (60), < VaR gate (126)
+    _insert_bars(session, spy, "tiingo", 205, adj_values=_adj_path(205, pattern=_SPY_PATTERN))
+    _insert_bars(session, shorty, "tiingo", 80)  # >= vol/dd gate (60), < sharpe/beta gate (126)
     _insert_bars(session, onebar, "tiingo", 1)  # no return series can be formed
+
+    rf_dates = _bdates(205)  # covers every fixture's window
+    _insert_rf(session, rf_dates)
 
     return {
         "nvda_dates": nvda_dates,
         "adj_path": _adj_path(205),
+        "rf_dates": rf_dates,
     }
 
 
@@ -95,9 +132,9 @@ def _get(client: TestClient, ticker: str, **params: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-def test_full_history_core_metrics_ok_sharpe_and_beta_unavailable(
-    api_client: TestClient, universe: dict[str, Any]
-) -> None:
+# Core metrics + happy-path Sharpe / beta
+# --------------------------------------------------------------------------- #
+def test_full_history_all_metrics_ok(api_client: TestClient, universe: dict[str, Any]) -> None:
     body = _get(api_client, "NVDA")
     dates: list[datetime.date] = universe["nvda_dates"]
     adj: list[float] = universe["adj_path"]
@@ -109,22 +146,34 @@ def test_full_history_core_metrics_ok_sharpe_and_beta_unavailable(
     assert body["analytics_start"] == dates[1].isoformat()
     assert body["analytics_end"] == dates[-1].isoformat()
 
-    for name in ("return_summary", "volatility", "drawdown", "var_es_95", "var_es_99"):
+    for name in (
+        "return_summary",
+        "volatility",
+        "drawdown",
+        "var_es_95",
+        "var_es_99",
+        "sharpe",
+        "beta",
+    ):
         assert body[name]["status"] == "ok", (name, body[name])
 
     assert body["return_summary"]["cumulative_return"] == pytest.approx(
         adj[-1] / adj[0] - 1.0, rel=1e-6
     )
     assert body["volatility"]["annualised_volatility"] > 0.0
-    assert body["volatility"]["trading_days_per_year"] == 252
     assert body["drawdown"]["max_drawdown"] <= 0.0
-    assert body["drawdown"]["observations_used"] == 204
 
-    for metric in ("sharpe", "beta"):
-        assert body[metric]["status"] == "unavailable"
-        assert body[metric]["reason"] == "risk_free_series_not_ingested"
-    assert body["sharpe"]["sharpe_ratio"] is None
-    assert body["beta"]["beta"] is None
+    assert body["sharpe"]["sharpe_ratio"] is not None
+    assert body["sharpe"]["observations_used"] == 204
+    assert body["sharpe"]["risk_free_basis"] == "daily_series"
+
+    assert body["beta"]["beta"] is not None
+    assert body["beta"]["alpha_daily"] is not None
+    assert body["beta"]["observations_used"] == 204
+    assert body["beta"]["aligned_start"] == dates[1].isoformat()
+    assert body["beta"]["aligned_end"] == dates[-1].isoformat()
+
+    assert body["assumptions"]["suppressed"] == []
 
 
 def test_ticker_is_normalised(api_client: TestClient, universe: dict[str, Any]) -> None:
@@ -137,7 +186,7 @@ def test_unknown_ticker_is_404(api_client: TestClient, universe: dict[str, Any])
     assert resp.status_code == 404
 
 
-def test_thin_history_suppresses_var_es_not_volatility(
+def test_thin_history_suppresses_var_es_sharpe_and_beta_not_volatility(
     api_client: TestClient, universe: dict[str, Any]
 ) -> None:
     body = _get(api_client, "SHORTY")  # 80 bars -> 79 returns
@@ -152,6 +201,15 @@ def test_thin_history_suppresses_var_es_not_volatility(
         assert block["observations_used"] == 79
         assert block["confidence"] == conf
         assert block["var"] is None
+
+    # RF and SPY are both present, but SHORTY's own history is too short for
+    # either gate - this is the "insufficient overlap" path, not "unavailable".
+    assert body["sharpe"]["status"] == "insufficient_observations"
+    assert body["sharpe"]["required"] == 126
+    assert body["sharpe"]["observations_used"] == 79
+    assert body["beta"]["status"] == "insufficient_observations"
+    assert body["beta"]["required"] == 126
+    assert body["beta"]["observations_used"] == 79
 
     suppressed = {s["metric"] for s in body["assumptions"]["suppressed"]}
     assert {"var_es_95", "var_es_99", "sharpe", "beta"} <= suppressed
@@ -170,8 +228,12 @@ def test_single_bar_everything_insufficient(
     for name in ("return_summary", "volatility", "drawdown", "var_es_95", "var_es_99"):
         assert body[name]["status"] == "insufficient_observations", name
         assert body[name]["observations_used"] == 0
-    assert body["sharpe"]["status"] == "unavailable"
-    assert body["beta"]["status"] == "unavailable"
+    assert body["sharpe"]["status"] == "insufficient_observations"
+    assert body["sharpe"]["required"] == 126
+    assert body["sharpe"]["observations_used"] == 0
+    assert body["beta"]["status"] == "insufficient_observations"
+    assert body["beta"]["required"] == 126
+    assert body["beta"]["observations_used"] == 0
 
 
 def test_date_range_filters_the_window(api_client: TestClient, universe: dict[str, Any]) -> None:
@@ -185,6 +247,10 @@ def test_date_range_filters_the_window(api_client: TestClient, universe: dict[st
     assert body["return_observations"] == 80
     assert body["analytics_start"] == dates[41].isoformat()
     assert body["analytics_end"] == dates[120].isoformat()
+    # 80 < 126: sharpe/beta insufficient in this narrower window even though
+    # RF/SPY cover it - not a provenance problem.
+    assert body["sharpe"]["status"] == "insufficient_observations"
+    assert body["beta"]["status"] == "insufficient_observations"
 
 
 def test_start_after_end_is_422(api_client: TestClient, universe: dict[str, Any]) -> None:
@@ -244,28 +310,28 @@ def test_openapi_describes_metric_fields_as_numbers_not_strings(
     assert _types("BetaMetric", "r_squared") == {"number", "null"}
     assert _types("VarEsMetric", "var") == {"number", "null"}
     assert _types("DrawdownMetric", "peak_date") == {"string", "null"}
+    assert _types("AnalyticsAssumptions", "rf_basis") == {"string", "null"}
     assert schemas["AnalyticsResponse"]["properties"]["price_observations"]["type"] == "integer"
 
 
-def test_assumptions_block_contract(api_client: TestClient, universe: dict[str, Any]) -> None:
+def test_assumptions_block_reports_kenneth_french_provenance(
+    api_client: TestClient, universe: dict[str, Any]
+) -> None:
     a = _get(api_client, "NVDA")["assumptions"]
     assert a["annualisation_factor"] == 252
     assert a["calendar"] == "XNYS"
     assert a["return_type"] == "total"
     assert a["adjustment_basis"] == "adjusted_close"
-    assert a["rf"] is None
-    assert isinstance(a["rf_source"], str) and a["rf_source"]
+    assert a["rf"] is None  # it's a time series now, never a scalar
+    assert a["rf_source"] == "kenneth_french_daily"
+    assert a["rf_basis"] == "daily_series"
     assert a["benchmark"] == "SPY" and a["market_proxy"] == "SPY"
     assert a["var_horizon_days"] == 1 and a["var_scaling"] == "none"
     assert a["confidence_levels"] == [0.95, 0.99]
     assert a["min_observations"]["sharpe"] == 126
     assert a["min_observations"]["beta"] == 126
     assert a["min_observations"]["volatility"] == 60
-
-    by_metric = {s["metric"]: s for s in a["suppressed"]}
-    assert by_metric["sharpe"]["status"] == "unavailable"
-    assert by_metric["sharpe"]["reason"] == "risk_free_series_not_ingested"
-    assert by_metric["beta"]["status"] == "unavailable"
+    assert a["suppressed"] == []  # everything is ok for full-history NVDA
 
 
 def test_phase_1e_endpoints_still_work(api_client: TestClient, universe: dict[str, Any]) -> None:
@@ -273,3 +339,116 @@ def test_phase_1e_endpoints_still_work(api_client: TestClient, universe: dict[st
     prices = api_client.get("/securities/NVDA/prices", params={"source": "tiingo"}).json()
     assert prices["count"] == len(prices["results"]) and prices["results"]
     assert api_client.get("/securities", params={"q": "NV"}).status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# RF / SPY failure ladder (each test builds its own minimal, isolated fixture)
+# --------------------------------------------------------------------------- #
+def test_missing_rf_leaves_sharpe_and_beta_unavailable_but_others_ok(
+    session: Session, api_client: TestClient
+) -> None:
+    nvda = _sec(session, "NVDA", "NVIDIA Corporation")
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    _insert_bars(session, nvda, "tiingo", 205)
+    _insert_bars(session, spy, "tiingo", 205, adj_values=_adj_path(205, pattern=_SPY_PATTERN))
+    # deliberately no FactorReturn rows at all
+
+    body = _get(api_client, "NVDA")
+    for name in ("return_summary", "volatility", "drawdown", "var_es_95", "var_es_99"):
+        assert body[name]["status"] == "ok", name
+    assert body["sharpe"] == {
+        "status": "unavailable",
+        "observations_used": None,
+        "required": None,
+        "reason": "risk_free_series_not_ingested",
+        "sharpe_ratio": None,
+        "mean_daily_excess_return": None,
+        "daily_excess_volatility": None,
+        "trading_days_per_year": 252,
+        "risk_free_basis": None,
+    }
+    assert body["beta"]["status"] == "unavailable"
+    assert body["beta"]["reason"] == "risk_free_series_not_ingested"
+
+    a = body["assumptions"]
+    assert a["rf_source"] == "not_ingested"
+    assert a["rf_basis"] is None
+    suppressed = {s["metric"]: s for s in a["suppressed"]}
+    assert suppressed["sharpe"]["reason"] == "risk_free_series_not_ingested"
+    assert suppressed["beta"]["reason"] == "risk_free_series_not_ingested"
+
+
+def test_missing_spy_security_leaves_beta_unavailable_but_sharpe_ok(
+    session: Session, api_client: TestClient
+) -> None:
+    nvda = _sec(session, "NVDA", "NVIDIA Corporation")
+    nvda_dates = _insert_bars(session, nvda, "tiingo", 205)
+    _insert_rf(session, nvda_dates)
+    # no SPY security row at all
+
+    body = _get(api_client, "NVDA")
+    assert body["sharpe"]["status"] == "ok"
+    assert body["beta"]["status"] == "unavailable"
+    assert body["beta"]["reason"] == "benchmark_security_not_found"
+    for name in ("return_summary", "volatility", "drawdown", "var_es_95", "var_es_99"):
+        assert body[name]["status"] == "ok", name
+
+
+def test_spy_security_without_price_history_leaves_beta_unavailable(
+    session: Session, api_client: TestClient
+) -> None:
+    nvda = _sec(session, "NVDA", "NVIDIA Corporation")
+    nvda_dates = _insert_bars(session, nvda, "tiingo", 205)
+    _insert_rf(session, nvda_dates)
+    _sec(session, "SPY", "SPDR S&P 500 ETF Trust")  # seeded, but zero price_bar rows
+
+    body = _get(api_client, "NVDA")
+    assert body["sharpe"]["status"] == "ok"
+    assert body["beta"]["status"] == "unavailable"
+    assert body["beta"]["reason"] == "benchmark_price_history_unavailable"
+
+
+def test_sharpe_undefined_for_zero_excess_variance(
+    session: Session, api_client: TestClient
+) -> None:
+    flat = _sec(session, "FLATCO", "Flat Return Corp.")
+    flat_dates = _insert_bars(session, flat, "tiingo", 205, adj_values=[100.0] * 205)
+    _insert_rf(session, flat_dates)
+
+    body = _get(api_client, "FLATCO")
+    assert body["volatility"]["status"] == "ok"
+    assert body["volatility"]["annualised_volatility"] == pytest.approx(0.0)
+    assert body["sharpe"]["status"] == "undefined"
+    assert body["sharpe"]["reason"] == "zero excess-return variance"
+    assert body["sharpe"]["sharpe_ratio"] is None
+
+
+def test_beta_r_squared_null_for_constant_asset_excess_return(
+    session: Session, api_client: TestClient
+) -> None:
+    flat = _sec(session, "FLATCO", "Flat Return Corp.")
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    flat_dates = _insert_bars(session, flat, "tiingo", 205, adj_values=[100.0] * 205)
+    _insert_bars(session, spy, "tiingo", 205, adj_values=_adj_path(205, pattern=_SPY_PATTERN))
+    _insert_rf(session, flat_dates)
+
+    body = _get(api_client, "FLATCO")
+    assert body["beta"]["status"] == "ok"
+    assert body["beta"]["r_squared"] is None
+    assert body["beta"]["beta"] == pytest.approx(0.0, abs=1e-9)
+    assert body["beta"]["alpha_daily"] is not None
+
+
+def test_beta_undefined_for_constant_benchmark_excess_return(
+    session: Session, api_client: TestClient
+) -> None:
+    nvda = _sec(session, "NVDA", "NVIDIA Corporation")
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    nvda_dates = _insert_bars(session, nvda, "tiingo", 205)
+    _insert_bars(session, spy, "tiingo", 205, adj_values=[100.0] * 205)  # flat SPY
+    _insert_rf(session, nvda_dates)
+
+    body = _get(api_client, "NVDA")
+    assert body["sharpe"]["status"] == "ok"  # unaffected by the flat benchmark
+    assert body["beta"]["status"] == "undefined"
+    assert body["beta"]["reason"] == "benchmark excess return has zero variance"

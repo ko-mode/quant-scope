@@ -106,3 +106,52 @@ class PriceProviderRateLimitedError(PriceProviderError):
 
 class PriceProviderBlockedError(PriceProviderError):
     """The provider served an anti-bot / browser-verification challenge instead of data."""
+
+
+# --------------------------------------------------------------------------- #
+# Daily factor returns (Phase 2B.1)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class RawFactorReturn:
+    """One (date, factor) value as a factor source delivered it - uninterpreted.
+
+    Long format: a wide source file (date + several factor columns) is exploded
+    into one record per factor. ``value`` is the source's text, still in the
+    source's units (Kenneth French publishes **percent**); unit conversion and
+    validation happen later in ``quantscope.data``.
+    """
+
+    trade_date: str | None
+    factor_name: str | None
+    value: str | None
+
+
+@runtime_checkable
+class DailyFactorProvider(Protocol):
+    """A source of daily factor-return history (e.g. the Kenneth French library)."""
+
+    #: Stable identifier written to ``factor_return.source`` and the run record.
+    source_name: str
+
+    def fetch_daily_factors(self) -> list[RawFactorReturn]:
+        """Return every daily factor record the source currently publishes.
+
+        The published files are not date-filterable; callers trim afterwards.
+        Raises :class:`FactorDataUnavailableError` when the payload contains no
+        usable rows and :class:`FactorProviderBlockedError` on an anti-bot page.
+        """
+        ...
+
+
+class FactorProviderError(RuntimeError):
+    """A factor provider could not return usable data."""
+
+
+class FactorDataUnavailableError(FactorProviderError):
+    """The payload held no recognisable factor rows."""
+
+
+class FactorProviderBlockedError(FactorProviderError):
+    """The source served an HTML / challenge page instead of the data file."""

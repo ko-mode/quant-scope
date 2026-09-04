@@ -6,7 +6,8 @@ code should import the specific model it needs.
 """
 
 from quantscope.db.models.data_ingestion_run import DataIngestionRun
+from quantscope.db.models.factor_return import FACTOR_NAMES, FactorReturn
 from quantscope.db.models.price_bar import PriceBar
 from quantscope.db.models.security import Security
 
-__all__ = ["DataIngestionRun", "PriceBar", "Security"]
+__all__ = ["FACTOR_NAMES", "DataIngestionRun", "FactorReturn", "PriceBar", "Security"]

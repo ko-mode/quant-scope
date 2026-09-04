@@ -8,8 +8,9 @@ analytics behind a polished research dashboard.
 > Phase 1 (DB, SEC seeding, Tiingo price provider + Pandera validation,
 > validated persistence, the read-only `GET /securities[...]` API, and the
 > frontend search → ticker page → adjusted-price chart) is complete. Phase 2A
-> (the pure `quantscope.quant` engine) is complete; 2B adds
-> `GET /securities/{ticker}/analytics`.
+> (the pure `quantscope.quant` engine), 2B (`GET /securities/{ticker}/analytics`)
+> and 2B.1 (Kenneth French daily factor + RF ingestion, wiring Sharpe and CAPM
+> beta to real risk-free data) are complete.
 > See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
 > [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
 
@@ -72,6 +73,7 @@ below and remains the source of truth.
 | `just seed *ARGS`        | backend `quantscope seed-securities` (security universe from SEC) |
 | `just ingest-prices TICKER *ARGS` | backend `quantscope ingest-prices` for one seeded ticker |
 | `just ingest-demo *ARGS` | ingest ~20y of daily prices for the six demo tickers (NVDA AMD INTC AAPL MSFT SPY) |
+| `just ingest-factors *ARGS` | backend `quantscope ingest-factors` (Kenneth French daily FF3 + RF)     |
 | `just check`             | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
 | `just compose-config`    | `docker compose config` (no daemon needed)                  |
 
@@ -254,17 +256,48 @@ curl -s "http://localhost:8000/securities/nvda"
 curl -s "http://localhost:8000/securities/NVDA/prices?source=tiingo&start=2024-01-01&end=2024-12-31"
 ```
 
-### Analytics API (Phase 2B)
+### Factor ingestion (Phase 2B.1)
+
+Fetch → parse → normalise → Pandera-validate → persist the Kenneth French
+**daily Fama/French 3 factors + RF** (`Mkt-RF`, `SMB`, `HML`, `RF`) into
+`factor_return`. This is what powers Sharpe and CAPM beta in the analytics API
+below; requires the migration applied (no security dependency - factors are
+market-wide, not tied to the seeded universe).
+
+```bash
+export QUANTSCOPE_DATABASE_URL=postgresql+psycopg://quantscope:quantscope@localhost:5432/quantscope
+
+uv run quantscope ingest-factors                                    # or: just ingest-factors
+uv run quantscope ingest-factors --start 2015-01-01 --end 2025-01-31 # trim the persisted window
+uv run quantscope ingest-factors --dry-run                          # fetch+validate only, no writes, no run row
+uv run quantscope ingest-factors --source-file ff3_daily.zip        # offline: a local ZIP or CSV copy
+```
+
+The Ken French file is not date-filterable at the source, so it is always
+fetched whole (~26k trading dates × 4 factors) and `--start`/`--end` trim the
+*persisted* window afterwards. One run, one `data_ingestion_run` row
+(`entity='factors'`, `source='kenneth_french'`). Stored `value` is a **decimal
+daily return** — the source's percent is divided by 100 before persistence
+(`0.25` → `0.0025`), so never treat a `factor_return.value` as a percentage.
+Persistence is idempotent on `(factor_name, frequency, trade_date, source)`:
+a re-run of unchanged data writes nothing; a changed value updates in place.
+A malformed row (bad date, unparseable number, an unsupported factor name, a
+Kenneth French missing-value sentinel, or a value implausible for a decimal
+daily return — `abs(value) >= 0.5`, a percent-vs-decimal-confusion tripwire,
+not an economic cap) is dropped with a structured reason, never guessed or
+coerced.
+
+### Analytics API (Phase 2B / 2B.1)
 
 `GET /securities/{ticker}/analytics?start=&end=&source=` exposes the pure
-`quantscope.quant` engine over persisted price history.
+`quantscope.quant` engine over persisted price and factor history.
 
 | Aspect | Behaviour |
 |---|---|
 | Input | One price `source`'s **adjusted-close** bars for the window (defaults to `QUANTSCOPE_PRICE_PROVIDER`; sources are never merged; no raw-close fallback). `start`/`end` are inclusive ISO dates, both optional; omitted ⇒ all persisted history. `start > end` → **422**. Unknown ticker → **404**. |
 | Metrics | `return_summary`, `volatility`, `drawdown` (summary fields only), `var_es_95`, `var_es_99`. Each carries a `status`: `ok` \| `insufficient_observations` (below the ADR 0017 gate — 60 for return/vol/drawdown, 126 for VaR/ES) \| `undefined` \| `unavailable`. One suppressed metric never fails the response; a security with `< 2` bars returns **200** with everything suppressed. |
-| Sharpe & beta | Present in the schema but `status: "unavailable"`, `reason: "risk_free_series_not_ingested"`. ADR 0017 defines them against the Ken French daily `RF` series (ADR 0013), which is ingested in **M2**; no constant/zero RF is substituted. They light up automatically once M2 lands. |
-| Metadata | `price_observations`, `return_observations`, `analytics_start` / `analytics_end` (first/last **return** dates), and an `assumptions` block (ADR 0005): `annualisation_factor` 252, `calendar` XNYS, `return_type` total, `rf_source` / `rf`, `benchmark` SPY, VaR horizon 1 / scaling none, `min_observations`, and a `suppressed` list. |
+| Sharpe & beta | Read the persisted Kenneth French daily `RF` (`_load_daily_risk_free`); beta additionally loads SPY (same price source) and lets the engine align asset / SPY / RF. `status` is `ok` once RF (and, for beta, SPY) is present with enough overlap; `insufficient_observations` below the 126-observation gate; `undefined` for a zero-variance excess return (Sharpe) or zero-variance benchmark excess (beta) — a constant *asset* excess return still yields a valid beta/alpha with `r_squared: null`; `unavailable` (`reason`: `risk_free_series_not_ingested`, `benchmark_security_not_found`, or `benchmark_price_history_unavailable`) only when a required series isn't persisted at all. No constant/zero RF is ever substituted (ADR 0013). A beta failure never affects unrelated metrics. |
+| Metadata | `price_observations`, `return_observations`, `analytics_start` / `analytics_end` (first/last **return** dates), and an `assumptions` block (ADR 0005): `annualisation_factor` 252, `calendar` XNYS, `return_type` total, `rf_source` (`kenneth_french_daily` or `not_ingested`) / `rf` (always `null` — RF is a time series, not one scalar) / `rf_basis` (`daily_series` or `null`), `benchmark` SPY, VaR horizon 1 / scaling none, `min_observations`, and a `suppressed` list. |
 | Numbers | `float` end to end (the engine's precision) → JSON numbers; `null` for absent values; OpenAPI describes them as `number`, never `string`. |
 
 ```bash

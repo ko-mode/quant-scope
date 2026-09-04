@@ -1,4 +1,4 @@
-"""Database-backed checks for migration 0001 and the model constraints.
+"""Database-backed checks for migrations 0001-0003 and the model constraints.
 
 Skipped unless ``QUANTSCOPE_TEST_DATABASE_URL`` is set (see conftest).
 """
@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from quantscope.db.base import Base
-from quantscope.db.models import DataIngestionRun, PriceBar, Security
+from quantscope.db.models import DataIngestionRun, FactorReturn, PriceBar, Security
 
 _EPOCH = datetime.date(2024, 1, 2)
 
@@ -51,7 +51,7 @@ def test_pg_trgm_extension_created(connection: Connection) -> None:
 
 def test_expected_tables_exist(connection: Connection) -> None:
     tables = set(inspect(connection).get_table_names())
-    assert {"security", "price_bar", "data_ingestion_run"} <= tables
+    assert {"security", "price_bar", "data_ingestion_run", "factor_return"} <= tables
 
 
 def test_migration_matches_models(connection: Connection) -> None:
@@ -272,5 +272,86 @@ def test_ingestion_run_check_constraints_reject(
     values: dict[str, object] = {"source": "stooq", "entity": "prices", "status": "success"}
     values.update(overrides)
     session.add(DataIngestionRun(**values))
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+# --------------------------------------------------------------------------- #
+# factor_return constraints (Phase 2B.1, ADR 0009)
+# --------------------------------------------------------------------------- #
+def test_factor_return_insert_defaults(session: Session) -> None:
+    row = FactorReturn(
+        factor_name="rf",
+        frequency="daily",
+        trade_date=_EPOCH,
+        source="kenneth_french",
+        value=Decimal("0.000090"),
+    )
+    session.add(row)
+    session.flush()
+    session.refresh(row)
+    assert row.ingested_at is not None
+
+
+def test_factor_return_no_foreign_key_to_security(session: Session) -> None:
+    # Factors are market-wide series, not securities - no security_id column at all.
+    assert not hasattr(FactorReturn, "security_id")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"factor_name": "momentum"},  # not one of mkt_rf/smb/hml/rf
+        {"frequency": "monthly"},  # V1 is daily-only
+        {"source": ""},
+        {"value": None},
+        {"trade_date": None},
+    ],
+)
+def test_factor_return_check_constraints_reject(
+    session: Session, overrides: dict[str, object]
+) -> None:
+    values: dict[str, object] = {
+        "factor_name": "rf",
+        "frequency": "daily",
+        "trade_date": _EPOCH,
+        "source": "kenneth_french",
+        "value": Decimal("0.0001"),
+    }
+    values.update(overrides)
+    session.add(FactorReturn(**values))
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_factor_return_value_has_no_range_check_at_the_db_layer(session: Session) -> None:
+    # The abs(value) < 0.5 percent-vs-decimal tripwire is an ingestion / Pandera
+    # heuristic (quantscope.data.factors), not a database constraint - the DB
+    # only enforces structural integrity (ADR 0009 addendum).
+    session.add(
+        FactorReturn(
+            factor_name="mkt_rf",
+            frequency="daily",
+            trade_date=_EPOCH,
+            source="kenneth_french",
+            value=Decimal("12.5"),
+        )
+    )
+    session.flush()  # does not raise
+
+
+def test_factor_return_primary_key_is_composite(session: Session) -> None:
+    common = {"trade_date": _EPOCH, "value": Decimal("0.0001")}
+    session.add(
+        FactorReturn(factor_name="rf", frequency="daily", source="kenneth_french", **common)
+    )
+    session.add(
+        FactorReturn(factor_name="mkt_rf", frequency="daily", source="kenneth_french", **common)
+    )
+    session.add(FactorReturn(factor_name="rf", frequency="daily", source="other_source", **common))
+    session.flush()
+    session.add(
+        FactorReturn(factor_name="rf", frequency="daily", source="kenneth_french", **common)
+    )  # exact duplicate key -> rejected
     with pytest.raises(IntegrityError):
         session.flush()

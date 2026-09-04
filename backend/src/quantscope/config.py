@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     # implementation / offline parser; its live endpoint is anti-bot gated (ADR 0022).
     stooq_base_url: str = "https://stooq.com/q/d/l/"
 
+    # Kenneth R. French Data Library - daily Fama/French 3 factors + RF (ADR 0009,
+    # ADR 0013). A ZIP containing one CSV; ingested by `quantscope ingest-factors`.
+    french_factors_url: str = (
+        "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+        "F-F_Research_Data_Factors_daily_CSV.zip"
+    )
+
     # CORS origins allowed to call the API (the Next.js dev server by default).
     cors_allow_origins: tuple[str, ...] = ("http://localhost:3000",)
 

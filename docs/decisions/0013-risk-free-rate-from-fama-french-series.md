@@ -1,6 +1,6 @@
 # 13. Risk-free rate from the Ken French `RF` series
 
-- **Status:** Accepted
+- **Status:** Accepted - **implemented** (Phase 2B.1, 2026-09-04)
 - **Date:** 2026-08-30
 
 ## Context
@@ -53,3 +53,28 @@ layer localises the change"). It returns `None` today; M2 makes it read the
 daily `RF` rows from `factor_return`, at which point Sharpe and beta become
 `ok` with **no change to the route, the schema, or the engine**. When that
 lands, `rf_source` becomes `"kenneth_french_daily"` per the decision above.
+
+## Addendum (2026-09-04, Phase 2B.1 - implemented)
+
+Migration `0003_factor_return` and `quantscope.data.factor_ingest` /
+`quantscope.data.providers.french_factors` (ADR 0009) now populate
+`factor_return` from the live Kenneth French daily FF3 file
+(`just ingest-factors`). The interim state described in the addendum above is
+resolved:
+
+- `_load_daily_risk_free` reads real `factor_name='rf', source='kenneth_french'`
+  rows and returns a `pandas.Series` when any exist for the window, `None`
+  otherwise (an empty/not-yet-ingested table, unchanged fallback behaviour).
+- Sharpe and CAPM beta now transition through their full status range:
+  `ok` (RF present, enough overlap), `insufficient_observations` (RF present,
+  overlap below the ADR 0017 gate), `undefined` (zero excess-return / zero
+  benchmark-excess variance), and `unavailable` only when RF (or, for beta,
+  SPY) is genuinely absent - never a fabricated constant/zero rate.
+- `assumptions.rf_source` is `"kenneth_french_daily"` and `assumptions.rf_basis`
+  is `"daily_series"` once RF is ingested; `"not_ingested"` / `null` otherwise.
+  `assumptions.rf` stays `null` in both cases - RF is a time series, never a
+  scalar, so there is no single "effective rate" to report.
+- A live ingestion (2026-09-04) persisted 105,096 rows (26,274 trading dates x
+  4 factors, 1926-07-01 to 2026-06-30) with zero dropped rows; a re-run
+  inserted 0 / updated 0 / left 105,096 unchanged, confirming idempotency
+  against the real file.

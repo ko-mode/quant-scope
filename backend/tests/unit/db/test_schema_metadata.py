@@ -26,7 +26,12 @@ def _check_names(table_name: str) -> set[str]:
 
 
 def test_expected_tables_registered() -> None:
-    assert set(metadata.tables) == {"security", "price_bar", "data_ingestion_run"}
+    assert set(metadata.tables) == {
+        "security",
+        "price_bar",
+        "data_ingestion_run",
+        "factor_return",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -180,7 +185,46 @@ def test_data_ingestion_run_check_constraints_present() -> None:
         ("security", "pk_security"),
         ("price_bar", "pk_price_bar"),
         ("data_ingestion_run", "pk_data_ingestion_run"),
+        ("factor_return", "pk_factor_return"),
     ],
 )
 def test_naming_convention_applied_to_primary_keys(table: str, pk_name: str) -> None:
     assert metadata.tables[table].primary_key.name == pk_name
+
+
+# --------------------------------------------------------------------------- #
+# factor_return (Phase 2B.1, ADR 0009)
+# --------------------------------------------------------------------------- #
+def test_factor_return_composite_primary_key() -> None:
+    assert list(metadata.tables["factor_return"].primary_key.columns.keys()) == [
+        "factor_name",
+        "frequency",
+        "trade_date",
+        "source",
+    ]
+
+
+def test_factor_return_columns_and_nullability() -> None:
+    cols = metadata.tables["factor_return"].c
+    expected = {"factor_name", "frequency", "trade_date", "source", "value", "ingested_at"}
+    assert set(cols.keys()) == expected
+    assert {c.name for c in cols if not c.nullable} == expected  # nothing nullable
+
+
+def test_factor_return_value_is_numeric_18_6() -> None:
+    col_type = metadata.tables["factor_return"].c.value.type
+    assert isinstance(col_type, Numeric)
+    assert (col_type.precision, col_type.scale) == (18, 6)
+
+
+def test_factor_return_has_no_foreign_keys() -> None:
+    # Factors are market-wide series, not securities (no FK to `security`).
+    assert list(metadata.tables["factor_return"].foreign_key_constraints) == []
+
+
+def test_factor_return_check_constraints_present() -> None:
+    assert _check_names("factor_return") == {
+        "ck_factor_return_factor_name_allowed",
+        "ck_factor_return_frequency_allowed",
+        "ck_factor_return_source_not_blank",
+    }
