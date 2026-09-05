@@ -7,6 +7,7 @@
 import { apiFetch } from "./client";
 import type {
   AnalyticsResponse,
+  FactorsResponse,
   PriceHistoryResponse,
   SecurityListResponse,
   SecurityRead,
@@ -86,6 +87,29 @@ export function getSecurityAnalytics(
 ): Promise<AnalyticsResponse> {
   return apiFetch<AnalyticsResponse>(
     `/securities/${encodeURIComponent(ticker)}/analytics${query({ start, end, source })}`,
+    init,
+  );
+}
+
+export interface FactorsQuery {
+  start?: string;
+  end?: string;
+  source?: string;
+  init?: RequestInit;
+}
+
+/**
+ * SPY CAPM regression + Fama-French 3-factor regression, both with
+ * Newey-West (HAC) inference (Phase 3B). Same `start`/`end` semantics as
+ * `getSecurityAnalytics`. All regression math happens on the backend - this
+ * only requests and returns the response.
+ */
+export function getSecurityFactors(
+  ticker: string,
+  { start, end, source, init }: FactorsQuery = {},
+): Promise<FactorsResponse> {
+  return apiFetch<FactorsResponse>(
+    `/securities/${encodeURIComponent(ticker)}/factors${query({ start, end, source })}`,
     init,
   );
 }

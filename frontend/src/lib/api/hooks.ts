@@ -4,10 +4,17 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import { rangeToParams, type RangeOption } from "@/lib/format";
 import { getComparison, MIN_COMPARISON_TICKERS } from "./comparison";
-import { getSecurityAnalytics, getSecurityPrices, MIN_SEARCH_LENGTH, searchSecurities } from "./securities";
+import {
+  getSecurityAnalytics,
+  getSecurityFactors,
+  getSecurityPrices,
+  MIN_SEARCH_LENGTH,
+  searchSecurities,
+} from "./securities";
 import type {
   AnalyticsResponse,
   ComparisonResponse,
+  FactorsResponse,
   PriceHistoryResponse,
   SecurityListResponse,
 } from "./types";
@@ -51,6 +58,21 @@ export function useSecurityAnalytics(ticker: string, range: RangeOption) {
     queryKey: ["securities", ticker, "analytics", range],
     queryFn: ({ signal }) =>
       getSecurityAnalytics(ticker, { ...rangeToParams(range), init: { signal } }),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * SPY CAPM regression + Fama-French 3-factor regression for a ticker over a
+ * range button (Phase 3B). Same `start`/`end` mapping and `keepPreviousData`
+ * / query-key convention as `useSecurityAnalytics`.
+ */
+export function useSecurityFactors(ticker: string, range: RangeOption) {
+  return useQuery<FactorsResponse>({
+    queryKey: ["securities", ticker, "factors", range],
+    queryFn: ({ signal }) =>
+      getSecurityFactors(ticker, { ...rangeToParams(range), init: { signal } }),
     placeholderData: keepPreviousData,
     staleTime: 60_000,
   });

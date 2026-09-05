@@ -215,3 +215,71 @@ export interface ComparisonResponse {
   normalized_performance: NormalizedPerformance | null;
   correlation: CorrelationMatrix | null;
 }
+
+/**
+ * TypeScript mirror of `backend/src/quantscope/api/factors_schemas.py`
+ * (Phase 3B `GET /securities/{ticker}/factors`). The SPY-based CAPM
+ * regression and the Fama-French 3-factor regression are always returned
+ * together in one response - never one model per request.
+ *
+ * `FactorModelStatus` preserves the same four-way distinction as
+ * `MetricStatus`, applied independently to `capm` and `ff3`: `undefined`
+ * means the aligned sample cleared its gate but the regression itself is not
+ * estimable (a zero-variance regressor, or a rank-deficient design) - it is
+ * never collapsed into `unavailable` (a missing *input*, before alignment).
+ */
+export type FactorModelStatus = "ok" | "insufficient_observations" | "undefined" | "unavailable";
+
+/**
+ * One OLS coefficient with Newey-West (HAC) inference. `estimate` is always
+ * populated for an `ok` model; the four inference fields are independently
+ * `null` - never `0`, never a raw `NaN`/`Infinity` - when that statistic is
+ * undefined for this coefficient (e.g. a HAC standard error of exactly zero).
+ */
+export interface RegressionCoefficient {
+  name: string;
+  estimate: number;
+  std_error: number | null;
+  t_stat: number | null;
+  p_value: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+}
+
+export interface FactorModelResult {
+  status: FactorModelStatus;
+  required: number | null;
+  observations_used: number | null;
+  reason: string | null;
+  aligned_start: string | null;
+  aligned_end: string | null;
+  coefficients: RegressionCoefficient[] | null;
+  r_squared: number | null;
+  adjusted_r_squared: number | null;
+  hac_lags: number | null;
+}
+
+/** ADR 0005 methodology block for the factors endpoint. `capm_vs_ff3_note`
+ * is the mandatory disambiguation between the SPY CAPM beta (Risk & Return
+ * tab) and the FF3 Mkt-RF coefficient below it - always render it verbatim. */
+export interface FactorsAssumptions {
+  capm_vs_ff3_note: string;
+  alpha_note: string;
+  adjustment_basis: "adjusted_close";
+  factor_source: string;
+  factor_frequency: "daily";
+  rf_source: string;
+  hac_lag_rule: string;
+  min_observations: Record<string, number>;
+}
+
+export interface FactorsResponse {
+  ticker: string;
+  source: string;
+  adjustment_basis: "adjusted_close";
+  requested_start: string | null;
+  requested_end: string | null;
+  capm: FactorModelResult;
+  ff3: FactorModelResult;
+  assumptions: FactorsAssumptions;
+}

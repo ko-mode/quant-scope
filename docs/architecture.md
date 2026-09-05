@@ -234,8 +234,8 @@ src/quantscope/
 ├── main.py                 app factory; /health, mounts /api/v1 routers
 ├── config.py               pydantic-settings; env-driven, dev defaults
 ├── api/
-│   ├── routers/            securities (1E); analytics, compare, fundamentals,
-│   │                       factors (later)
+│   ├── routers/            securities (1E); analytics, compare, factors (3B);
+│   │                       fundamentals (later)
 │   └── schemas.py          response DTOs, distinct from ORM (1E)
 ├── services/               one module per domain area; fundamentals resolver
 ├── quant/
@@ -250,7 +250,8 @@ src/quantscope/
 │   ├── comparison.py       N-way inner-joined return panel, base-100 normalized
 │   │                       performance (NaT anchor, no return divided away),
 │   │                       Pearson correlation over the one common panel (3A)
-│   ├── factors.py          FF3 OLS regression + HAC (Newey-West) SEs
+│   ├── factors.py          SPY CAPM regression + FF3 OLS regression, both with
+│   │                       Newey-West (HAC) inference (3B, ADR 0017 addendum)
 │   └── calendar.py         XNYS trading calendar wrapper, session alignment
 ├── logging_setup.py       structured JSON-line logging for CLI jobs
 ├── data/
@@ -336,6 +337,18 @@ with **Newey-West (HAC)** standard errors.
 > common stock, dividends and delistings included). Their market-sensitivity
 > estimates legitimately differ; neither is "the" beta.
 
+**Phase 3B** additionally exposes a **CAPM regression** - the same SPY-based
+model as the beta above, but with full OLS/HAC inference (standard error,
+t-stat, p-value, 95% CI) that the point-estimate-only `capm_beta` does not
+compute; `capm_beta` itself is unchanged. Both regressions share one fitted
+`statsmodels` OLS model per call (`cov_type="HAC"` changes only the
+covariance estimate, never the coefficients); the Newey-West lag is
+`floor(4 * (T/100) ** (2/9))`, minimum 1, recorded as `hac_lags`. A
+zero-variance regressor or a rank-deficient design (checked explicitly,
+before fitting) makes that regression `undefined`, distinct from
+`unavailable` (a missing input) - see ADR 0017's 2026-09-05 addendum and
+ADR 0023.
+
 ### Historical VaR / Expected Shortfall
 * **1-trading-day horizon only** in V1, historical (empirical) method.
 * `VaR_alpha = -(empirical (1 - alpha) quantile of daily total returns)`,
@@ -364,7 +377,7 @@ whose denominator has zero variance is reported `{..., status: "undefined"}`.
 | Threshold (usable daily obs) | Metrics gated                                        |
 |------------------------------|-----------------------------------------------------|
 | **60**                       | returns, annualised volatility, drawdown / max drawdown |
-| **126**                      | Sharpe, beta, historical VaR, historical ES          |
+| **126**                      | Sharpe, beta, historical VaR, historical ES, CAPM regression |
 | **250**                      | FF3 regression                                       |
 
 ### Multi-security comparison
@@ -454,7 +467,7 @@ may report individual metrics as suppressed with a structured reason (§5).
 | `GET /securities/{ticker}/analytics?start&end&source` | Return summary / volatility / Sharpe / max drawdown / CAPM beta (vs SPY) / 1-day historical VaR & ES at 95% and 99% + `assumptions`. One source, adjusted close, per-metric `status`. Sharpe & beta read the persisted Kenneth French `RF` (Phase 2B.1); `unavailable` only when RF (or SPY, for beta) is not persisted. Shipped in Phase 2B / 2B.1. |
 | `GET /securities/{ticker}/risk?confidence&level` | 1-day historical VaR / ES detail (95% and 99%).              |
 | `GET /securities/{ticker}/fundamentals`         | Revenue, earnings, growth, market cap, P/E, forward P/E, P/S. Each value resolved via the canonical-metric mapping and tagged with `tag`, `period_end`, `filed_date`, `accession_no`; **returned as `unavailable` (with a reason) when no mapped tag is present** - never guessed. |
-| `GET /securities/{ticker}/factors?model=ff3&start&end` | FF3 regression: Mkt-RF / SMB / HML coefficients, HAC standard errors, t-stats, R², n. Response states explicitly that the Mkt-RF coefficient is **not** the SPY CAPM beta. |
+| `GET /securities/{ticker}/factors?start&end&source` | The SPY CAPM regression and the FF3 regression (Mkt-RF/SMB/HML), both returned together with Newey-West (HAC) standard errors, t-stats, p-values, R², and `hac_lags`. Per-model `status` (`ok` / `insufficient_observations` / `undefined` / `unavailable`); `assumptions.capm_vs_ff3_note` states explicitly that the Mkt-RF coefficient is **not** the SPY CAPM beta. No `model` query param (ADR 0023). Shipped in Phase 3B. |
 | `GET /compare?tickers=A,B,...&start&end&source` | 2-8 distinct tickers -> one N-way inner-joined return panel -> base-100 normalized performance (every aligned return compounded, none divided away) + Pearson correlation matrix + `observations_used`, `aligned_start`, `aligned_end`. Flat provenance fields (no nested `assumptions`). `status`: `ok` / `insufficient_observations` (panel < `MIN_OBS_COMPARISON` = 60) / `unavailable` (any ticker has < 2 persisted bars, lists every offender). Shipped in Phase 3A. |
 
 `/health` (liveness) is served at the root, outside `/api/v1`.
@@ -580,20 +593,26 @@ Delivered in sub-phases.
   SPY) is persisted with enough overlap - `insufficient_observations` /
   `undefined` / `unavailable` otherwise, per ADR 0017 / ADR 0013. No frontend;
   no FF3 regression yet.
-- **M2 + Phase 3B** - FF3 regression (Mkt-RF/SMB/HML OLS + Newey-West HAC),
-  reusing `factor_return` and `get_factor_panel` as-is; rolling series +
-  drawdown time-series endpoints. Frontend: metrics panel, rolling and drawdown
-  charts.
+- **3B** *(complete)* - `quant/factors`: the SPY CAPM regression and the FF3
+  regression (Mkt-RF/SMB/HML), both OLS with Newey-West (HAC) inference (ADR
+  0017 addendum, 2026-09-05), reusing `factor_return` /
+  `get_factor_panel` as-is - no migration. `quantscope.services.factors` +
+  `GET /securities/{ticker}/factors` return both models in one response (ADR
+  0023); `FactorModelStatus` (`ok` / `insufficient_observations` /
+  `undefined` / `unavailable`) applied independently per model.
+  `risk.capm_beta` and the Risk & Return "Beta vs SPY" metric are unchanged.
+  Frontend Factors tab activated: CAPM and FF3 shown simultaneously, each a
+  coefficient table (factor / estimate / HAC SE / t-stat / p-value), no
+  chart. Rolling factor betas, FF5, momentum, and drawdown/rolling
+  time-series endpoints remain out of scope (§9) - not part of Phase 3B.
 
 ### Phase 3 - Comparison, correlation, fundamentals, factor regression
+Comparison (3A) and factor regression (3B, see above) are complete. Remaining:
 SEC EDGAR fundamentals ingestion (`filed_date`, `accession_no`);
 **canonical-metric mapping layer** (ordered US-GAAP tag sets per displayed
-metric; `unavailable` rather than guessed); on-the-fly valuation ratios;
-`POST /compare` on one inner-joined panel with correlation matrix and alignment
-metadata; `quant/factors` FF3 OLS + HAC SEs; `GET /securities/{ticker}/factors`
-with the SPY-beta-vs-Mkt-RF distinction stated. Frontend: compare view +
-correlation heatmap, fundamentals tables, factor-exposure view, dashboard polish
-pass. **Migration M3.**
+metric; `unavailable` rather than guessed); on-the-fly valuation ratios.
+Frontend: correlation heatmap, fundamentals tables, dashboard polish pass.
+**Migration M3.**
 
 ### Beyond the MVP (architecture-compatible, not scheduled here)
 Phase 4 portfolio analytics · Phase 5 backtesting engine · Phase 6 SEC filings

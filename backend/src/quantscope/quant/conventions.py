@@ -41,6 +41,17 @@ MIN_OBS_HISTORICAL_ES: Final = 126
 MIN_OBS_FF3_REGRESSION: Final = 250
 """Reserved for the Phase 3 Fama-French regression; not consumed in Phase 2A."""
 
+MIN_OBS_CAPM_REGRESSION: Final = MIN_OBS_BETA
+"""Gate for the Phase 3B SPY-based CAPM regression with HAC inference (ADR 0017
+addendum, Phase 3B). Deliberately reuses :data:`MIN_OBS_BETA` - it is the same
+economic model, and statistical order, as the existing point-estimate-only
+``capm_beta``; a different gate would be an unjustified inconsistency.
+
+The Newey-West / HAC lag rule itself (``floor(4*(T/100)**(2/9))``, minimum 1)
+is a formula of the sample size, not a fixed numerical convention, so it is
+implemented as :func:`quantscope.quant.factors.newey_west_lags` rather than a
+constant here (ADR 0017 addendum, Phase 3B)."""
+
 # --- Multi-security comparison (Phase 3A, ADR 0017 "Multi-security comparison") ---
 MIN_OBS_COMPARISON: Final = MIN_OBS_RETURN_STATS
 """Gate for the one common aligned-return panel (normalized performance +
@@ -58,12 +69,14 @@ MIN_OBSERVATIONS: Final[dict[str, int]] = {
     "historical_var_es": max(MIN_OBS_HISTORICAL_VAR, MIN_OBS_HISTORICAL_ES),
     "ff3_regression": MIN_OBS_FF3_REGRESSION,
     "comparison": MIN_OBS_COMPARISON,
+    "capm_regression": MIN_OBS_CAPM_REGRESSION,
 }
 """Metric name -> its minimum-observation gate, for a single lookup point."""
 
 __all__ = [
     "MIN_OBSERVATIONS",
     "MIN_OBS_BETA",
+    "MIN_OBS_CAPM_REGRESSION",
     "MIN_OBS_COMPARISON",
     "MIN_OBS_DRAWDOWN",
     "MIN_OBS_FF3_REGRESSION",

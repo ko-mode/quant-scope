@@ -25,6 +25,7 @@ def test_observation_gates() -> None:
     assert c.MIN_OBS_HISTORICAL_ES == 126
     assert c.MIN_OBS_FF3_REGRESSION == 250
     assert c.MIN_OBS_COMPARISON == 60
+    assert c.MIN_OBS_CAPM_REGRESSION == 126
 
 
 def test_observation_lookup_table() -> None:
@@ -37,4 +38,5 @@ def test_observation_lookup_table() -> None:
         "historical_var_es": 126,
         "ff3_regression": 250,
         "comparison": 60,
+        "capm_regression": 126,
     }

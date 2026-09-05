@@ -131,17 +131,19 @@ export function observationsFraction(
   return `${used} / ${required} observations`;
 }
 
-/**
- * Human label for a metric's `reason` when `status === "unavailable"`. Known
- * codes come from `quantscope.services.analytics`; an unrecognised code (e.g.
- * a future addition) falls back to a de-slugged version rather than hiding it.
- */
 const UNAVAILABLE_REASON_LABEL: Record<string, string> = {
   risk_free_series_not_ingested: "RF not ingested",
   benchmark_security_not_found: "SPY benchmark unavailable",
   benchmark_price_history_unavailable: "Benchmark history unavailable",
+  asset_price_history_unavailable: "Price history unavailable",
 };
 
+/**
+ * Human label for a metric's `reason` when `status === "unavailable"`. Known
+ * codes come from `quantscope.services.analytics`; an unrecognised code (e.g.
+ * a future addition, or a Phase 3B `factor_not_ingested:<name>` code) falls
+ * back to a de-slugged version rather than hiding it.
+ */
 export function unavailableReasonLabel(reason: string | null | undefined): string {
   if (!reason) return "Unavailable";
   return UNAVAILABLE_REASON_LABEL[reason] ?? reason.replaceAll("_", " ");
@@ -167,6 +169,17 @@ export function analyticsRangeLabel(analytics: {
  */
 export function formatCorrelation(value: number | null | undefined): string {
   return value == null || Number.isNaN(value) ? "—" : value.toFixed(2);
+}
+
+/**
+ * p-value formatting for factor-regression coefficients (Phase 3B). A very
+ * small p-value renders as "<0.0001" rather than "0.0000", which would
+ * misleadingly read as exactly zero.
+ */
+export function formatPValue(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  if (value < 0.0001) return "<0.0001";
+  return value.toFixed(4);
 }
 
 export function emptyStateFor(range: RangeOption): EmptyState {

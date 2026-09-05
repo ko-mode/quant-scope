@@ -18,9 +18,12 @@ cumulative wealth index, descriptive return stats, annualised volatility, the
 annualised Sharpe ratio, drawdown analytics, CAPM beta and 1-day historical
 VaR / Expected Shortfall. Phase 3A adds multi-security comparison: one common
 inner-joined return panel, normalized performance and Pearson correlation
-(:mod:`quantscope.quant.comparison`). Numerical conventions and the
-minimum-observation gates live in :mod:`quantscope.quant.conventions`
-(ADR 0017).
+(:mod:`quantscope.quant.comparison`). Phase 3B adds the SPY-based CAPM
+regression and the Fama-French 3-factor regression, both with Newey-West
+(HAC) inference (:mod:`quantscope.quant.factors`) - ``capm_beta`` is
+unchanged and remains the sole basis for the Risk & Return "Beta vs SPY"
+metric. Numerical conventions and the minimum-observation gates live in
+:mod:`quantscope.quant.conventions` (ADR 0017).
 """
 
 from __future__ import annotations
@@ -35,6 +38,13 @@ from quantscope.quant.conventions import (
     VAR_ES_HORIZON_DAYS,
 )
 from quantscope.quant.drawdown import DrawdownResult, drawdown_analysis
+from quantscope.quant.factors import (
+    FactorRegressionResult,
+    RegressionCoefficient,
+    capm_regression,
+    ff3_regression,
+    newey_west_lags,
+)
 from quantscope.quant.performance import SharpeResult, sharpe_ratio
 from quantscope.quant.results import (
     InsufficientObservations,
@@ -66,19 +76,24 @@ __all__ = [
     "BetaResult",
     "ComparisonPanel",
     "DrawdownResult",
+    "FactorRegressionResult",
     "HistoricalVarEsResult",
     "InsufficientObservations",
     "QuantInputError",
+    "RegressionCoefficient",
     "ReturnSummary",
     "SharpeResult",
     "UndefinedResult",
     "VolatilityResult",
     "annualised_volatility",
     "capm_beta",
+    "capm_regression",
     "compare_securities",
     "cumulative_wealth_index",
     "drawdown_analysis",
+    "ff3_regression",
     "historical_var_es",
+    "newey_west_lags",
     "return_summary",
     "sharpe_ratio",
     "simple_returns",

@@ -129,3 +129,55 @@ unchanged; these only pin down details it left open.
 - **Suppression object field names.** `InsufficientObservations(metric,
   required, observations_used, status)` - the wire names from this ADR, carried
   unchanged from the engine through to the response (no internal renaming).
+
+## Addendum (2026-09-05, Phase 3B implementation - CAPM regression + FF3 with HAC)
+
+Clarifications settled while building `quantscope.quant.factors`. The
+Fama-French 3-factor decision above is unchanged; this pins down the CAPM
+regression's regressor, the Newey-West lag rule, the pre-fit check order, and
+alpha's annualisation status - none of which the original decision or its
+2026-09-04 addendum specified.
+
+- **Phase 3B's "CAPM regression" uses SPY, not Mkt-RF.** It is the same
+  economic model as the existing user-facing beta above
+  (`R_i - RF = alpha + beta_SPY * (R_SPY - RF) + eps`), computed by a new
+  function (`quant.factors.capm_regression`) that adds full OLS/HAC
+  inference (standard error, t-statistic, p-value, 95% CI) that
+  `risk.capm_beta` does not compute. `risk.capm_beta` itself, and the Risk &
+  Return "Beta vs SPY" metric it backs, are **unchanged**. There is no
+  regression in this codebase, anywhere, that treats Mkt-RF as "the CAPM
+  market factor" - Mkt-RF only ever appears as one of the three FF3 factors.
+- **Newey-West (HAC) lag rule**: `L = floor(4 * (T/100) ** (2/9))`, minimum
+  1 - the Newey & West (1994) plug-in bandwidth, a deterministic function of
+  the sample size `T` (`observations_used`) alone. Implemented as
+  `quant.factors.newey_west_lags` and recorded verbatim as `hac_lags` on
+  every successful result, never a hidden library default.
+- **One fitted OLS model, not two.** `sm.OLS(y, X).fit(cov_type="HAC",
+  cov_kwds={"maxlags": L, "use_correction": True})` supplies both the
+  coefficients (`cov_type` changes only the covariance estimate, never the
+  point estimates) and the HAC-based inference from that same fit. There is
+  no separate classical-OLS fit anywhere, and no classical-OLS standard
+  error is exposed on the wire - HAC-only inference, per the original
+  decision's text above.
+- **Alpha is never annualised**, for either regression - reported only as
+  the daily intercept, exactly like `BetaResult.alpha_daily`. No
+  `alpha_annualized` field exists anywhere (quant dataclass, API schema,
+  service mapping, or frontend).
+- **Explicit pre-fit checks, in this order** - neither relies on
+  `statsmodels.add_constant(..., has_constant="raise")`:
+  1. Each regressor's own variance, checked individually. A constant
+     regressor (e.g. a zero-variance `SMB` window) returns
+     `UndefinedResult(metric, "regressor '<name>' has zero variance", n)`,
+     naming the offending regressor.
+  2. Only if every regressor varies: the assembled design matrix's rank
+     (`numpy.linalg.matrix_rank`). A rank-deficient design from otherwise-
+     varying, collinear regressors returns
+     `UndefinedResult(metric, "design matrix is rank-deficient", n)`.
+
+  A constant *dependent* variable (the asset's excess return) is not an
+  `UndefinedResult` - matching the existing `capm_beta` precedent, the
+  regression stays valid (`r_squared`/`adjusted_r_squared` become `None`,
+  the `0/0` case, never `0.0`).
+- **CAPM regression gate**: `MIN_OBS_CAPM_REGRESSION = MIN_OBS_BETA = 126` -
+  reused rather than a new number, since it is the same regression family as
+  the existing beta. FF3's `MIN_OBS_FF3_REGRESSION = 250` is unchanged.

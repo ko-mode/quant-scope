@@ -14,11 +14,13 @@ vi.mock("next/link", () => ({
 const usePriceHistory = vi.fn();
 const useSecurityAnalytics = vi.fn();
 const useComparison = vi.fn();
+const useSecurityFactors = vi.fn();
 const useSecuritySearch = vi.fn();
 vi.mock("@/lib/api/hooks", () => ({
   usePriceHistory: (...args: unknown[]) => usePriceHistory(...args),
   useSecurityAnalytics: (...args: unknown[]) => useSecurityAnalytics(...args),
   useComparison: (...args: unknown[]) => useComparison(...args),
+  useSecurityFactors: (...args: unknown[]) => useSecurityFactors(...args),
   useSecuritySearch: (...args: unknown[]) => useSecuritySearch(...args),
 }));
 
@@ -32,6 +34,7 @@ beforeEach(() => {
   usePriceHistory.mockReset().mockReturnValue(idleQuery());
   useSecurityAnalytics.mockReset().mockReturnValue(idleQuery());
   useComparison.mockReset().mockReturnValue(idleQuery());
+  useSecurityFactors.mockReset().mockReturnValue(idleQuery());
   useSecuritySearch.mockReset().mockReturnValue(idleQuery());
 });
 
@@ -56,6 +59,13 @@ describe("SecurityTabs", () => {
     expect(useSecurityAnalytics).toHaveBeenCalledWith("NVDA", "1Y");
   });
 
+  it("switching to Factors calls the factors endpoint for the current ticker", () => {
+    render(<SecurityTabs ticker="NVDA" />);
+    fireEvent.click(screen.getByRole("tab", { name: "Factors" }));
+    expect(screen.getByRole("tab", { name: "Factors" }).getAttribute("aria-selected")).toBe("true");
+    expect(useSecurityFactors).toHaveBeenCalledWith("NVDA", "1Y");
+  });
+
   it("switching back to Price re-shows price content", () => {
     render(<SecurityTabs ticker="NVDA" />);
     fireEvent.click(screen.getByRole("tab", { name: "Risk & Return" }));
@@ -63,14 +73,18 @@ describe("SecurityTabs", () => {
     expect(screen.getByRole("tab", { name: "Price" }).getAttribute("aria-selected")).toBe("true");
   });
 
-  it("Factors and Fundamentals are disabled and carry a SOON badge", () => {
+  it("Fundamentals is disabled and carries a SOON badge", () => {
     render(<SecurityTabs ticker="NVDA" />);
-    for (const label of ["Factors", "Fundamentals"]) {
-      const el = screen.getByText(label).closest("[aria-disabled]");
-      expect(el).toBeTruthy();
-      expect(el?.tagName).not.toBe("BUTTON");
-      expect(el?.querySelector(".qs-tab__soon")?.textContent).toBe("SOON");
-    }
+    const el = screen.getByText("Fundamentals").closest("[aria-disabled]");
+    expect(el).toBeTruthy();
+    expect(el?.tagName).not.toBe("BUTTON");
+    expect(el?.querySelector(".qs-tab__soon")?.textContent).toBe("SOON");
+  });
+
+  it("Factors is enabled - no SOON badge, a real tab role", () => {
+    render(<SecurityTabs ticker="NVDA" />);
+    expect(screen.getByRole("tab", { name: "Factors" })).toBeTruthy();
+    expect(screen.queryByText("Factors")?.closest("[aria-disabled]")).toBeNull();
   });
 
   it("switching to Comparison seeds the ticker set with the current page ticker", () => {
@@ -86,8 +100,8 @@ describe("SecurityTabs", () => {
 
   it("clicking a SOON tab does nothing (no tab role, stays on the current tab)", () => {
     render(<SecurityTabs ticker="NVDA" />);
-    fireEvent.click(screen.getByText("Factors"));
+    fireEvent.click(screen.getByText("Fundamentals"));
     expect(screen.getByRole("tab", { name: "Price" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.queryByRole("tab", { name: "Factors" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Fundamentals" })).toBeNull();
   });
 });
