@@ -229,4 +229,16 @@ describe("FactorsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /retry/i }));
     expect(refetch).toHaveBeenCalled();
   });
+
+  it("shows a visible Refreshing indicator while placeholder data is displayed (QS-07)", () => {
+    hookState({ isSuccess: true, isPlaceholderData: true, data: factorsFixture() });
+    render(<FactorsPanel ticker="NVDA" />);
+    expect(screen.getByTestId("factors-refreshing").textContent).toContain("Refreshing");
+  });
+
+  it("does not show the Refreshing indicator for fresh (non-placeholder) data", () => {
+    hookState({ isSuccess: true, data: factorsFixture() });
+    render(<FactorsPanel ticker="NVDA" />);
+    expect(screen.queryByTestId("factors-refreshing")).toBeNull();
+  });
 });

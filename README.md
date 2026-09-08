@@ -4,15 +4,20 @@ A quantitative equity research platform: search a US equity, ingest and store
 its market data, and compute deterministic performance, risk and factor
 analytics behind a polished research dashboard.
 
-> **Status: Phase 2 (deterministic single-name analytics), in sub-phases.**
+> **Status: Phases 0-3B complete (MVP scope = Phases 0-3).**
 > Phase 1 (DB, SEC seeding, Tiingo price provider + Pandera validation,
 > validated persistence, the read-only `GET /securities[...]` API, and the
-> frontend search → ticker page → adjusted-price chart) is complete. Phase 2A
-> (the pure `quantscope.quant` engine), 2B (`GET /securities/{ticker}/analytics`)
-> and 2B.1 (Kenneth French daily factor + RF ingestion, wiring Sharpe and CAPM
-> beta to real risk-free data) are complete.
+> frontend search → ticker page → adjusted-price chart) is complete. Phase 2
+> (the pure `quantscope.quant` engine, `GET /securities/{ticker}/analytics`,
+> and Kenneth French daily factor + RF ingestion wiring Sharpe and CAPM beta
+> to real risk-free data) is complete. Phase 3A (`GET /compare`, multi-security
+> comparison) and Phase 3B (`GET /securities/{ticker}/factors`, SPY CAPM +
+> Fama-French 3-factor regression with Newey-West/HAC inference) are complete.
+> Remaining Phase 3 scope is SEC EDGAR fundamentals ingestion and the
+> canonical-metric mapping layer - not yet started, and not required for the
+> analytics already shipped.
 > See [`docs/architecture.md`](docs/architecture.md) §10 for the roadmap and
-> [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0022).
+> [`docs/decisions/`](docs/decisions/) for the decision records (ADRs 0001-0023).
 
 ---
 
@@ -22,18 +27,24 @@ analytics behind a polished research dashboard.
 quant-scope/
 ├── backend/            FastAPI + SQLAlchemy + Alembic (Python, uv)
 │   ├── src/quantscope/
-│   │   ├── api/        HTTP layer (routers, schemas) - /health only for now
+│   │   ├── api/        HTTP layer: routers (health, securities, analytics,
+│   │   │               compare, factors) + schemas
 │   │   ├── quant/      PURE analytics library (stdlib + numpy/pandas/scipy/
 │   │   │               statsmodels/pandera only; boundary enforced in CI)
-│   │   ├── db/         SQLAlchemy base + session (no models yet)
+│   │   ├── data/       providers, ingestion, validation, XNYS calendar
+│   │   ├── services/   orchestration: services.{analytics,comparison,factors}
+│   │   ├── db/         SQLAlchemy base + session + ORM models (security,
+│   │   │               price_bar, factor_return, data_ingestion_run) +
+│   │   │               repositories
 │   │   ├── config.py   pydantic-settings
 │   │   └── main.py     application factory
-│   ├── alembic/        migration env (no migrations yet)
+│   ├── alembic/        migration env + migrations 0001-0003
 │   └── tests/          pytest (unit/ + integration/)
 ├── frontend/           Next.js (App Router) + TypeScript + TanStack Query
 │   └── src/
 │       ├── app/        layout, providers (QueryClient), landing page
-│       └── lib/api/    typed fetch client (endpoints added in Phase 1)
+│       ├── components/ Price / Risk & Return / Comparison / Factors tab panels
+│       └── lib/api/    typed fetch client
 ├── docs/               architecture.md + decisions/ (ADRs)
 ├── .github/workflows/  CI (backend, frontend, compose validation)
 ├── docker-compose.yml  db + backend + frontend
@@ -74,7 +85,7 @@ below and remains the source of truth.
 | `just ingest-prices TICKER *ARGS` | backend `quantscope ingest-prices` for one seeded ticker |
 | `just ingest-demo *ARGS` | ingest ~20y of daily prices for the six demo tickers (NVDA AMD INTC AAPL MSFT SPY) |
 | `just ingest-factors *ARGS` | backend `quantscope ingest-factors` (Kenneth French daily FF3 + RF)     |
-| `just check`             | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm build` |
+| `just check`             | `lint` + `typecheck` + `import-boundaries` + `test` + frontend `pnpm test` + frontend `pnpm build` |
 | `just compose-config`    | `docker compose config` (no daemon needed)                  |
 
 ---
@@ -294,7 +305,7 @@ coerced.
 
 | Aspect | Behaviour |
 |---|---|
-| Input | One price `source`'s **adjusted-close** bars for the window (defaults to `QUANTSCOPE_PRICE_PROVIDER`; sources are never merged; no raw-close fallback). `start`/`end` are inclusive ISO dates, both optional; omitted ⇒ all persisted history. `start > end` → **422**. Unknown ticker → **404**. |
+| Input | One price `source`'s **adjusted-close** bars for the window (defaults to `QUANTSCOPE_PRICE_PROVIDER`; sources are never merged; no raw-close fallback). `source` only accepts `tiingo` here — Stooq's unverified adjustment is rejected with **422**, whether passed explicitly or only reachable via a `QUANTSCOPE_PRICE_PROVIDER=stooq` default (ADR 0022; QS-06 / RA-02). `start`/`end` are inclusive ISO dates, both optional; omitted ⇒ all persisted history. `start > end` → **422**. Unknown ticker → **404**. |
 | Metrics | `return_summary`, `volatility`, `drawdown` (summary fields only), `var_es_95`, `var_es_99`. Each carries a `status`: `ok` \| `insufficient_observations` (below the ADR 0017 gate — 60 for return/vol/drawdown, 126 for VaR/ES) \| `undefined` \| `unavailable`. One suppressed metric never fails the response; a security with `< 2` bars returns **200** with everything suppressed. |
 | Sharpe & beta | Read the persisted Kenneth French daily `RF` (`_load_daily_risk_free`); beta additionally loads SPY (same price source) and lets the engine align asset / SPY / RF. `status` is `ok` once RF (and, for beta, SPY) is present with enough overlap; `insufficient_observations` below the 126-observation gate; `undefined` for a zero-variance excess return (Sharpe) or zero-variance benchmark excess (beta) — a constant *asset* excess return still yields a valid beta/alpha with `r_squared: null`; `unavailable` (`reason`: `risk_free_series_not_ingested`, `benchmark_security_not_found`, or `benchmark_price_history_unavailable`) only when a required series isn't persisted at all. No constant/zero RF is ever substituted (ADR 0013). A beta failure never affects unrelated metrics. |
 | Metadata | `price_observations`, `return_observations`, `analytics_start` / `analytics_end` (first/last **return** dates), and an `assumptions` block (ADR 0005): `annualisation_factor` 252, `calendar` XNYS, `return_type` total, `rf_source` (`kenneth_french_daily` or `not_ingested`) / `rf` (always `null` — RF is a time series, not one scalar) / `rf_basis` (`daily_series` or `null`), `benchmark` SPY, VaR horizon 1 / scaling none, `min_observations`, and a `suppressed` list. |
@@ -308,7 +319,41 @@ curl -s "http://localhost:8000/securities/NVDA/analytics?start=2021-01-01&end=20
 Analytics are deterministic: identical persisted inputs always yield identical
 output, and no wall-clock time is read.
 
-### Frontend (Phase 1F)
+### Comparison API (Phase 3A)
+
+`GET /compare?tickers=A,B,...&start=&end=&source=` compares 2-8 distinct
+tickers on one common, N-way inner-joined return panel.
+
+| Aspect | Behaviour |
+|---|---|
+| Input | `tickers` is a comma-separated list, normalised and de-duplicated, 2-8 distinct tickers required (**422** otherwise). Same `start`/`end`/`source` conventions as `/analytics`, including the `tiingo`-only `source` restriction (QS-06 / RA-02). Any unknown ticker → **404**. |
+| Panel | Each ticker's own adjusted-close returns are computed independently, then joined into **one** inner-joined panel (never pairwise) - `observations_used`, `aligned_start`, `aligned_end` all describe that single panel. |
+| Status | Flat top-level `status` (no nested `assumptions` block, unlike `/analytics`): `ok`; `insufficient_observations` (panel below `MIN_OBS_COMPARISON` = 60 - including when every persisted-history ticker's returns are entirely suppressed by a calendar gap, RA-03); `unavailable` (any ticker has fewer than 2 persisted bars at all, `unavailable_tickers` lists every offender). |
+| Output | `normalized_performance` (base 100, every aligned return compounded, none divided away) and a Pearson `correlation` matrix, both `null` unless `status: "ok"`. A zero-variance ticker's correlation cells are `null`, listed in `zero_variance_tickers` - never coerced to `0`/`1`. |
+
+```bash
+curl -s "http://localhost:8000/compare?tickers=NVDA,AMD,INTC&source=tiingo"
+```
+
+### Factors API (Phase 3B)
+
+`GET /securities/{ticker}/factors?start=&end=&source=` returns two regressions
+together: the SPY CAPM regression and the Fama-French 3-factor (Mkt-RF/SMB/HML)
+regression, both OLS with Newey-West (HAC) standard errors, t-stats, p-values
+and 95% confidence intervals (ADR 0017 addendum, ADR 0023).
+
+| Aspect | Behaviour |
+|---|---|
+| Input | Same `start`/`end`/`source` conventions as `/analytics`, including the `tiingo`-only `source` restriction (QS-06 / RA-02). Unknown ticker → **404**. |
+| Models | `capm` (asset excess return vs SPY excess return - the same economic model as the Risk & Return tab's "Beta vs SPY", now with full inference) and `ff3` (asset excess return vs Ken French Mkt-RF/SMB/HML), returned together in one response - never split across two requests. **The SPY CAPM beta and the FF3 Mkt-RF coefficient are different quantities**, stated explicitly in `assumptions.capm_vs_ff3_note`. |
+| Status | Each model has its own 4-valued `status`, independent of the other: `ok`; `insufficient_observations` (aligned panel below the model's gate - 126 for CAPM, 250 for FF3 - including zero valid returns from calendar-gap suppression despite persisted history existing, RA-03); `undefined` (a zero-variance regressor or a rank-deficient design, named in `reason`); `unavailable` (a required input - price history, RF, or a factor - was never ingested at all). |
+| Coefficients | `alpha` first, then the regressor(s) in a fixed order. `alpha` is always the **daily** regression intercept - never annualised. `hac_lags` records the exact Newey-West lag used (`floor(4*(T/100)**(2/9))`, minimum 1), reproducible from `observations_used` alone. A coefficient's `std_error`/`t_stat`/`p_value`/`ci_low`/`ci_high` may individually be `null` even when the model's own `status` is `ok` (e.g. a HAC standard error that underflows to exactly 0) - `estimate` stays populated. |
+
+```bash
+curl -s "http://localhost:8000/securities/NVDA/factors?source=tiingo"
+```
+
+### Frontend (Phase 1F, extended through 3B)
 
 ```bash
 cd frontend
@@ -316,17 +361,25 @@ pnpm install
 pnpm dev                     # http://localhost:3000  (needs the backend on :8000)
 ```
 
-The market-data experience: a **landing search** (`GET /securities?q=`, debounced,
-keyboard-navigable), a **ticker page** at `/securities/{ticker}`
-(`GET /securities/{ticker}`; unknown ticker → styled 404), and a
-**historical price chart** (`GET /securities/{ticker}/prices`). The chart plots
-`adj_close` (the V1 total-return series, ADR 0012) as a hand-drawn SVG line +
-area, with `1Y / 3Y / 5Y / MAX` range controls that translate to the API's
-`start` param, an optional dashed raw-`close` overlay, and a crosshair tooltip.
-The resolved `source` is shown next to the chart; series from different providers
-are never merged. No analytics are computed client-side.
+A **landing search** (`GET /securities?q=`, debounced, keyboard-navigable) and
+a **ticker page** at `/securities/{ticker}` (`GET /securities/{ticker}`;
+unknown ticker → styled 404) with four tabs, one per backend endpoint added
+since Phase 1F; Fundamentals is shown as a disabled "soon" tab, since it is
+not built yet:
 
-Stack additions: `next/font` for Inter + IBM Plex Mono; a hand-rolled SVG chart
+| Tab | Backed by | Notes |
+|---|---|---|
+| Price | `GET /securities/{ticker}/prices` | Plots `adj_close` (the V1 total-return series, ADR 0012) as a hand-drawn SVG line + area, `1Y/3Y/5Y/MAX` range controls, an optional dashed raw-`close` overlay, a crosshair tooltip, and the resolved `source` shown next to the chart. |
+| Risk & Return | `GET /securities/{ticker}/analytics` | Return summary, volatility, Sharpe, max drawdown, beta vs SPY, historical VaR/ES - each rendered per its own `status`, never a fabricated number for a suppressed metric. |
+| Comparison | `GET /compare` | A ticker-chip picker (2-8 securities), the normalized-performance chart, and a correlation table; `null` correlation cells render as `—`, never `0`/`1`. |
+| Factors | `GET /securities/{ticker}/factors` | CAPM and FF3 coefficient tables shown simultaneously (factor / estimate / HAC SE / t-stat / p-value), with the mandatory SPY-vs-Mkt-RF disambiguation note - no chart. |
+
+Every panel shows an explicit "Refreshing…" indicator while TanStack Query is
+serving placeholder data for a newly selected ticker/range, so a previous
+result is never mistaken for a confirmed one (QS-07). No analytics are
+computed client-side; every number comes from the backend as-is.
+
+Stack additions: `next/font` for Inter + IBM Plex Mono; hand-rolled SVG charts
 (no charting dependency); Vitest + Testing Library for component/logic tests.
 Light theme only.
 
@@ -369,16 +422,23 @@ the default points at `localhost:5432`.
 
 ## Data
 
-No external datasets are committed to this repository (ADR 0015). Prices, SEC
-fundamentals and Fama-French factors are fetched by local ingestion (added in
-Phase 1). Tests use synthetic fixtures and hand-built golden values. "Reproduce
+No external datasets are committed to this repository (ADR 0015). The security
+universe (from SEC reference data, not SEC *fundamentals* - see below), daily
+prices, and Kenneth French daily factors are all fetched by local ingestion.
+SEC EDGAR *fundamentals* (revenue, earnings, per-share metrics) are not
+ingested by this MVP - see "What this MVP intentionally does not include yet"
+below. Tests use synthetic fixtures and hand-built golden values. "Reproduce
 the demo" means run the documented ingestion, not clone a dataset.
 
 ---
 
-## What Phase 0 intentionally does **not** include
+## What this MVP intentionally does **not** include yet
 
-Portfolio analytics, backtesting, SEC filings, the AI assistant and its
-evaluation harness, authentication, Redis, and background workers. These are
-supported by the architecture but are added in later phases - see
-`docs/architecture.md` sections 9-10. No placeholder packages exist for them.
+Fundamentals (SEC EDGAR ingestion + the canonical-metric mapping layer) is the
+one piece of the original Phase 0-3 MVP scope not yet built; it is deferred,
+not required for the analytics, comparison, and factor regression already
+shipped. Portfolio analytics, backtesting, SEC filings browsing, the AI
+assistant and its evaluation harness, authentication, Redis, and background
+workers are all out of MVP scope entirely. These are supported by the
+architecture but would be added in later phases - see `docs/architecture.md`
+sections 9-10. No placeholder packages exist for them.

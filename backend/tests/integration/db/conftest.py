@@ -80,6 +80,26 @@ def session(connection: Connection) -> Iterator[Session]:
 
 
 @pytest.fixture
+def configured_stooq_provider() -> Iterator[None]:
+    """Simulate a deployment with ``QUANTSCOPE_PRICE_PROVIDER=stooq`` (RA-02).
+
+    ``get_settings()`` is process-cached (``functools.lru_cache``), so the env
+    var alone is not enough once it has already been read once in this test
+    session - the cache must be cleared for the new value to take effect, and
+    cleared again afterwards so later tests see the real environment.
+    """
+    from quantscope.config import get_settings
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("QUANTSCOPE_PRICE_PROVIDER", "stooq")
+        get_settings.cache_clear()
+        try:
+            yield
+        finally:
+            get_settings.cache_clear()
+
+
+@pytest.fixture
 def api_client(connection: Connection) -> Iterator[TestClient]:
     """A FastAPI TestClient whose ``get_session`` dependency rides the test's
     rolled-back transaction, so API reads see rows the test inserted and nothing

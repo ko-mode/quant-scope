@@ -4,7 +4,9 @@ Flow::
 
     price_bar rows (one source, ascending, unpaginated)
       -> adjusted-close pandas.Series          (raw `close` is never used - ADR 0012)
-      -> quantscope.quant.simple_returns()      [called once, reused by every metric]
+      -> data.calendar.session_continuous_returns()  [simple_returns(), with the
+         one return spanning any missing XNYS session excluded - QS-01, ADR 0006;
+         called once, reused by every metric]
       -> return_summary / annualised_volatility / drawdown_analysis /
          historical_var_es(0.95) / historical_var_es(0.99)
       -> Sharpe:  sharpe_ratio(returns, risk_free_daily = rf)
@@ -15,8 +17,12 @@ Flow::
 The risk-free series is the **Kenneth French daily RF** persisted in
 ``factor_return`` (ADR 0013). :func:`_load_daily_risk_free` reads it; the quant
 engine owns date alignment (asset / SPY / RF are inner-joined inside the engine).
-When RF is not ingested, Sharpe and CAPM beta report ``status="unavailable"``,
-``reason="risk_free_series_not_ingested"`` - no constant/zero RF is substituted.
+When RF was never ingested for this source at all, Sharpe and CAPM beta report
+``status="unavailable"``, ``reason="risk_free_series_not_ingested"`` - no
+constant/zero RF is substituted. When RF **is** ingested but the requested
+window has no overlapping rows, that is a thin window, not a missing input
+(QS-03): it flows through as an empty series and Sharpe / beta report the
+ordinary ``insufficient_observations`` gate instead.
 
 Deterministic: no clock is read. ``assumptions.as_of`` is the last return date.
 """
@@ -42,9 +48,10 @@ from quantscope.api.analytics_schemas import (
     VolatilityMetric,
 )
 from quantscope.config import get_settings
+from quantscope.data.calendar import session_continuous_returns
 from quantscope.data.reference import normalize_ticker
 from quantscope.db.models import FactorReturn, PriceBar, Security
-from quantscope.db.repositories.factors import get_factor_series
+from quantscope.db.repositories.factors import existing_factor_names, get_factor_series
 from quantscope.db.repositories.prices import get_all_price_bars
 from quantscope.db.repositories.securities import get_security_by_ticker
 from quantscope.quant import (
@@ -64,7 +71,6 @@ from quantscope.quant import (
     historical_var_es,
     return_summary,
     sharpe_ratio,
-    simple_returns,
 )
 from quantscope.quant.conventions import (
     MIN_OBS_BETA,
@@ -126,13 +132,24 @@ def _load_daily_risk_free(
     start: datetime.date | None,
     end: datetime.date | None,
 ) -> pd.Series | None:
-    """The Kenneth French daily ``RF`` series for ``[start, end]``, or ``None``.
+    """The Kenneth French daily ``RF`` series for ``[start, end]``.
 
     Reads ``factor_return`` rows with ``factor_name = 'rf'`` from the
-    ``kenneth_french`` source (ADR 0013). Returns ``None`` when nothing is
-    persisted for the window - the service then withholds Sharpe / beta rather
-    than substitute a constant rate. The quant engine trims the series to the
-    overlap with the asset (and SPY) returns.
+    ``kenneth_french`` source (ADR 0013). Three cases (QS-03):
+
+    * rows exist in the window -> that series.
+    * no rows in the window, but ``rf`` is ingested for this source at some
+      other date -> an **empty** (not ``None``) series. The quant engine's own
+      inner join then sees zero aligned observations, so Sharpe / beta report
+      ``insufficient_observations`` - a thin window, not a missing input.
+    * ``rf`` was never ingested for this source at all -> ``None``. The
+      service then reports ``unavailable`` rather than substitute a constant
+      rate.
+
+    Returning an empty series (not raising, not ``None``) for the middle case
+    is what lets a genuinely-ingested-but-out-of-range RF series flow through
+    the same ``insufficient_observations`` gate as any other thin window,
+    instead of being misreported as "not ingested".
     """
     rows = get_factor_series(
         session,
@@ -141,7 +158,13 @@ def _load_daily_risk_free(
         start=start,
         end=end,
     )
-    return _risk_free_series(rows) if rows else None
+    if rows:
+        return _risk_free_series(rows)
+    if _RF_FACTOR_NAME in existing_factor_names(
+        session, source=_RF_FACTOR_SOURCE, factor_names=(_RF_FACTOR_NAME,)
+    ):
+        return _risk_free_series(())
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -296,6 +319,17 @@ def _compute_sharpe(returns: pd.Series, rf: pd.Series | None) -> SharpeMetric:
             reason=_RF_UNAVAILABLE_REASON,
             trading_days_per_year=TRADING_DAYS_PER_YEAR,
         )
+    if len(rf) == 0:
+        # rf is ingested for this source, just not covering this window
+        # (QS-03) - zero aligned observations, not a structural error; never
+        # feed an empty series into sharpe_ratio (its own validation raises
+        # on that, reserved for a genuine caller bug, not a thin window).
+        return SharpeMetric(
+            status="insufficient_observations",
+            required=MIN_OBS_SHARPE,
+            observations_used=0,
+            trading_days_per_year=TRADING_DAYS_PER_YEAR,
+        )
     return _map_sharpe(sharpe_ratio(returns, risk_free_daily=rf))
 
 
@@ -310,6 +344,10 @@ def _compute_beta(
 ) -> BetaMetric:
     if rf is None:
         return BetaMetric(status="unavailable", reason=_RF_UNAVAILABLE_REASON)
+    if len(rf) == 0:
+        return BetaMetric(
+            status="insufficient_observations", required=MIN_OBS_BETA, observations_used=0
+        )
 
     benchmark = normalize_ticker(get_settings().default_benchmark_ticker)
     spy = get_security_by_ticker(session, benchmark) if benchmark is not None else None
@@ -320,7 +358,17 @@ def _compute_beta(
     if len(spy_bars) < 2:
         return BetaMetric(status="unavailable", reason=_BETA_NO_BENCHMARK_HISTORY)
 
-    spy_returns = simple_returns(_adjusted_close_series(spy_bars))
+    spy_returns = session_continuous_returns(_adjusted_close_series(spy_bars))
+    if len(spy_returns) == 0:
+        # SPY-01: >= 2 SPY bars are already confirmed above - SPY's price
+        # history is not missing, so `unavailable` would misrepresent this.
+        # Every adjacency simply happened to span a missing XNYS session
+        # (QS-01), leaving zero usable benchmark returns. Reported the same
+        # way a thin RF series is reported just above: insufficient
+        # observations, observed = 0, against the same beta gate.
+        return BetaMetric(
+            status="insufficient_observations", required=MIN_OBS_BETA, observations_used=0
+        )
     return _map_beta(capm_beta(asset_returns, spy_returns, rf))
 
 
@@ -382,7 +430,16 @@ def compute_ticker_analytics(
     price_observations = len(prices)
     rf = _load_daily_risk_free(session, start=start, end=end)
 
-    if price_observations < 2:
+    # QS-01: even with >= 2 prices, every adjacency can happen to span a
+    # missing XNYS session, leaving zero usable returns - the same
+    # "insufficient" outcome as too few prices, computed once here so neither
+    # branch below ever calls a metric function with an empty return series
+    # (validate_return_series treats that as a structural error, not a thin
+    # one - reserved for a genuine caller bug).
+    returns = session_continuous_returns(prices) if price_observations >= 2 else prices.iloc[0:0]
+    return_observations = len(returns)
+
+    if return_observations == 0:
         # No return series can be formed: every metric is suppressed for want of
         # observations (0), and the endpoint still returns 200.
         return_summary_metric: ReturnSummaryMetric = ReturnSummaryMetric(
@@ -425,16 +482,20 @@ def compute_ticker_analytics(
         )
         analytics_start: datetime.date | None = None
         analytics_end: datetime.date | None = None
-        return_observations = 0
     else:
-        returns = simple_returns(prices)
-        return_observations = len(returns)
         analytics_start = _to_date(pd.Timestamp(returns.index[0]))
         analytics_end = _to_date(pd.Timestamp(returns.index[-1]))
 
         return_summary_metric = _map_return_summary(return_summary(returns))
         volatility_metric = _map_volatility(annualised_volatility(returns))
-        drawdown_metric = _map_drawdown(drawdown_analysis(returns))
+        # anchor_date = the price immediately preceding the first *surviving*
+        # return (not necessarily prices.index[0] - QS-01's gap filtering can
+        # exclude the very first adjacency), so a drawdown starting on that
+        # first return reports its truthful pre-return peak date (QS-02).
+        anchor_pos = prices.index.get_indexer(pd.DatetimeIndex([returns.index[0]]))[0] - 1
+        drawdown_metric = _map_drawdown(
+            drawdown_analysis(returns, anchor_date=pd.Timestamp(prices.index[anchor_pos]))
+        )
         var_es_95 = _map_var_es(historical_var_es(returns, 0.95), confidence=0.95)
         var_es_99 = _map_var_es(historical_var_es(returns, 0.99), confidence=0.99)
         sharpe_metric = _compute_sharpe(returns, rf)

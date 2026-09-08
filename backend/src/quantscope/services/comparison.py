@@ -7,7 +7,10 @@ Flow::
         db.repositories.prices.get_all_price_bars(security, source, start, end)
         -> adjusted-close pandas.Series                        # raw close never read (ADR 0012)
         < 2 bars for ANY ticker -> status="unavailable" (no comparison attempted)
-        else -> quant.simple_returns(prices)                   # per ticker, before any cross-asset join
+        else -> data.calendar.session_continuous_returns(prices)  # per ticker, before any cross-
+                # asset join; the one return spanning a missing XNYS session is excluded
+                # (QS-01, ADR 0006) - this is what makes each ticker's calendar actually
+                # "unbroken" rather than merely assumed to be
     quant.comparison.compare_securities(returns)                # the ONE common inner-joined panel
         -> InsufficientObservations -> status="insufficient_observations"
         -> ComparisonPanel          -> status="ok"; map to NormalizedPerformance + CorrelationMatrix
@@ -30,14 +33,15 @@ from quantscope.api.comparison_schemas import (
     CorrelationMatrix,
     NormalizedPerformance,
 )
+from quantscope.data.calendar import session_continuous_returns
 from quantscope.db.models import PriceBar, Security
 from quantscope.db.repositories.prices import get_all_price_bars
 from quantscope.db.repositories.securities import get_security_by_ticker
 from quantscope.quant import (
+    MIN_OBS_COMPARISON,
     ComparisonPanel,
     InsufficientObservations,
     compare_securities,
-    simple_returns,
 )
 
 _UNAVAILABLE_REASON = "missing_price_history"
@@ -202,7 +206,34 @@ def compute_comparison(
             unavailable_tickers=unavailable_tickers,
         )
 
-    returns = {ticker: simple_returns(series) for ticker, series in price_series.items()}
+    returns: dict[str, pd.Series] = {}
+    zero_return_tickers: list[str] = []
+    for ticker, series in price_series.items():
+        ticker_returns = session_continuous_returns(series)
+        if len(ticker_returns) == 0:
+            zero_return_tickers.append(ticker)
+            continue
+        returns[ticker] = ticker_returns
+
+    if zero_return_tickers:
+        # RA-03: every requested ticker has >= 2 persisted bars (checked
+        # above) - price history is not missing, so "unavailable" /
+        # "missing_price_history" would misrepresent this. QS-01's gap
+        # suppression (data.calendar.session_continuous_returns) simply left
+        # at least one ticker with zero usable one-session returns, because
+        # every adjacency happened to span a missing XNYS session. Reported
+        # the same way analytics.py reports the identical situation:
+        # insufficient_observations, observed = 0 - never unavailable, and
+        # never fed into compare_securities (its own validation raises on an
+        # empty series, reserved for a genuine caller bug, not thin data).
+        return _insufficient_response(
+            tickers=tickers,
+            source=source,
+            start=start,
+            end=end,
+            result=InsufficientObservations("comparison", MIN_OBS_COMPARISON, 0),
+        )
+
     result = compare_securities(returns)
 
     if isinstance(result, InsufficientObservations):

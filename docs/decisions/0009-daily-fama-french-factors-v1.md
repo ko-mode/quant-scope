@@ -1,7 +1,9 @@
 # 9. Daily Fama-French factors for V1; schema supports monthly
 
-- **Status:** Accepted - ingestion **implemented** (Phase 2B.1, 2026-09-04); FF3
-  regression itself remains Phase 3B
+- **Status:** Accepted - **implemented**: ingestion (Phase 2B.1, 2026-09-04)
+  and the FF3 regression itself, alongside the CAPM regression, both with
+  Newey-West (HAC) inference (Phase 3B, `GET /securities/{ticker}/factors`;
+  RA-05)
 - **Date:** 2026-08-30
 
 ## Context

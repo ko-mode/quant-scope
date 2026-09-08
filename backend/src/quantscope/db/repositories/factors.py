@@ -167,8 +167,30 @@ def get_factor_panel(
     ).all()
 
 
+def existing_factor_names(
+    session: Session, *, source: str, factor_names: Sequence[str]
+) -> set[str]:
+    """Which of ``factor_names`` have **any** persisted row for ``source``,
+    ignoring date bounds entirely (QS-03).
+
+    One query, not one per factor. Used to distinguish "this factor was never
+    ingested for this source" (``unavailable``) from "it is ingested, just not
+    in the requested window" (the aligned sample is simply short -
+    ``insufficient_observations``, exactly like any other thin window) - a
+    date-bounded :func:`get_factor_series` / :func:`get_factor_panel` result
+    of zero rows cannot tell those two apart on its own.
+    """
+    stmt = select(FactorReturn.factor_name.distinct()).where(
+        FactorReturn.source == source,
+        FactorReturn.frequency == _FREQUENCY,
+        FactorReturn.factor_name.in_(list(factor_names)),
+    )
+    return set(session.scalars(stmt).all())
+
+
 __all__ = [
     "FactorUpsertCounts",
+    "existing_factor_names",
     "get_factor_panel",
     "get_factor_series",
     "upsert_factor_returns",

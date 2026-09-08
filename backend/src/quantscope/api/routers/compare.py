@@ -19,8 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from quantscope.api.comparison_schemas import ComparisonResponse
-from quantscope.api.schemas import PriceSource
-from quantscope.config import get_settings
+from quantscope.api.schemas import QuantitativeSource, resolve_quantitative_source
 from quantscope.data.reference import normalize_ticker
 from quantscope.db.session import get_session
 from quantscope.services.comparison import UnknownTickerError, compute_comparison
@@ -73,8 +72,13 @@ def get_comparison(
     start: Annotated[datetime.date | None, Query(description="Inclusive ISO date.")] = None,
     end: Annotated[datetime.date | None, Query(description="Inclusive ISO date.")] = None,
     source: Annotated[
-        PriceSource | None,
-        Query(description="Price provider. Defaults to the configured price provider."),
+        QuantitativeSource | None,
+        Query(
+            description="Price provider. Defaults to the configured price provider. "
+            "Stooq is excluded (QS-06), including when only the configured "
+            "default provider would resolve to it (RA-02): its adjusted-close "
+            "is unverified, see ADR 0022."
+        ),
     ] = None,
 ) -> ComparisonResponse:
     parsed_tickers = _parse_tickers(tickers)
@@ -83,7 +87,7 @@ def get_comparison(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"start {start.isoformat()} is after end {end.isoformat()}",
         )
-    resolved_source = source or get_settings().price_provider
+    resolved_source = resolve_quantitative_source(source)
     try:
         return compute_comparison(
             session, tickers=parsed_tickers, source=resolved_source, start=start, end=end

@@ -1,10 +1,12 @@
 # QuantScope - Architecture
 
-**Status:** approved for implementation (MVP scope = Phases 0-3)
-**Last updated:** 2026-08-30 - Phase 0 review (provenance, fundamentals mapping,
-quant conventions, dependency contract, DataFrame contracts, product priorities,
-task runner); Phase 1A-1D in progress (ADRs 0021-0022; Phase 1 split into
-sub-phases 1A-1F)
+**Status:** approved for implementation (MVP scope = Phases 0-3); Phases 0-3B
+are implemented as of 2026-09-07 - see §10 for the phase-by-phase roadmap.
+**Last updated:** 2026-09-07 - RA-05 documentation reconciliation (this
+document had drifted since the 2026-08-30 Phase 0 review: §8's API surface
+and §10's roadmap now describe the actually-implemented Phase 0-3B state,
+not Phase 0/early-Phase-1 sketches). See `docs/decisions/` for the individual
+QS-01..QS-10 and RA-01..RA-05 remediation-pass records.
 
 QuantScope is a quantitative equity research platform. This document describes
 the architecture that has been approved for the initial, CV-ready product
@@ -216,68 +218,94 @@ Kenneth French daily FF3 (ZIP -> CSV)
   `reason: "risk_free_series_not_ingested"` - no constant or zero RF is ever
   substituted (ADR 0013). CAPM beta additionally reports `unavailable` with
   `benchmark_security_not_found` / `benchmark_price_history_unavailable` when
-  SPY itself (same price source as the asset) is missing or too short - a
-  missing benchmark never fails the other metrics. The engine
-  (`sharpe_ratio` / `capm_beta`) owns all date alignment; the service passes
-  raw asset / SPY / RF series and never pre-joins them.
-* **Same factor infrastructure will carry Phase 3B.** `factor_return` also
-  holds `mkt_rf`, `smb`, `hml` (not yet read by any service) and
-  `get_factor_panel` returns all four together - the FF3 regression endpoint
-  reuses this table and reader pattern without a schema change.
+  SPY itself is missing or has fewer than 2 persisted bars (same price source
+  as the asset); when SPY has enough bars but XNYS gap suppression (QS-01)
+  leaves zero valid one-session SPY returns, that is not missing history, so
+  beta instead reports `insufficient_observations` / `observations_used: 0`
+  against the same beta gate (SPY-01) - a missing or thin benchmark never
+  fails the other metrics. The engine (`sharpe_ratio` / `capm_beta`) owns all
+  date alignment; the service passes raw asset / SPY / RF series and never
+  pre-joins them.
+* **The same factor infrastructure carries Phase 3B (implemented).**
+  `factor_return` also holds `mkt_rf`, `smb`, `hml`, read by
+  `quant.factors.ff3_regression` via `services.factors` and
+  `get_factor_panel` - the FF3 regression endpoint
+  (`GET /securities/{ticker}/factors`) reuses this table and reader pattern
+  without a schema change, exactly as anticipated when Phase 2B.1 shipped.
 * **No pandas in the router.** SQL stays in the repository; the router owns only
   HTTP status codes.
 
-### Package map (target state at end of Phase 3)
+### Package map (current state, Phase 0-3B; QS-10)
+
+Reflects what is actually implemented today - not a forward-looking sketch.
+Genuinely future work (fundamentals, rolling betas, FF5, etc.) is **not**
+listed here; see §9 "Deliberately deferred" for that.
 
 ```
 src/quantscope/
-├── main.py                 app factory; /health, mounts /api/v1 routers
+├── main.py                 app factory; routes mounted at the root (no /api/v1
+│                           prefix) - /health, /securities, /compare, and the
+│                           per-ticker /analytics and /factors routes
 ├── config.py               pydantic-settings; env-driven, dev defaults
 ├── api/
-│   ├── routers/            securities (1E); analytics, compare, factors (3B);
-│   │                       fundamentals (later)
+│   ├── routers/            securities (1E); analytics (2B); compare (3A);
+│   │                       factors (3B)
 │   └── schemas.py          response DTOs, distinct from ORM (1E)
-├── services/               one module per domain area; fundamentals resolver
-├── quant/
+├── services/               one module per domain area: analytics, comparison,
+│                           factors
+├── quant/                  pure, deterministic, I/O-free (ADR 0002)
 │   ├── conventions.py      annualisation factor (252), confidence levels,
 │   │                       MIN_OBSERVATIONS thresholds - single source
 │   ├── frames.py           Pandera schemas for the DataFrame boundary
-│   ├── returns.py          simple/log returns, cumulative, annualised
-│   ├── risk.py             volatility, rolling vol, 1-day historical VaR/ES,
-│   │                       beta (vs SPY), covariance, correlation
-│   ├── drawdown.py         drawdown series, max drawdown, duration/recovery
-│   ├── performance.py      Sharpe, Sortino, CAGR, tracking error
+│   ├── returns.py          simple returns, cumulative wealth index,
+│   │                       descriptive return stats (no log returns in V1)
+│   ├── risk.py             annualised volatility, 1-day historical VaR/ES,
+│   │                       CAPM beta (vs SPY, point estimates only)
+│   ├── drawdown.py         drawdown series, max drawdown, peak/trough/
+│   │                       recovery dates (anchor-inclusive - QS-02)
+│   ├── performance.py      annualised Sharpe ratio
 │   ├── comparison.py       N-way inner-joined return panel, base-100 normalized
 │   │                       performance (NaT anchor, no return divided away),
 │   │                       Pearson correlation over the one common panel (3A)
-│   ├── factors.py          SPY CAPM regression + FF3 OLS regression, both with
-│   │                       Newey-West (HAC) inference (3B, ADR 0017 addendum)
-│   └── calendar.py         XNYS trading calendar wrapper, session alignment
+│   └── factors.py          SPY CAPM regression + FF3 OLS regression, both with
+│                           Newey-West (HAC) inference (3B, ADR 0017 addendum)
 ├── logging_setup.py       structured JSON-line logging for CLI jobs
 ├── data/
 │   ├── providers/
-│   │   ├── base.py         SecurityReferenceProvider, DailyPriceProvider (+ Fundamentals/Factor later)
+│   │   ├── base.py         SecurityReferenceProvider, DailyPriceProvider,
+│   │   │                   DailyFactorProvider
 │   │   ├── sec_edgar.py    company_tickers_exchange parse + provider
 │   │   ├── tiingo.py       Tiingo EOD JSON parse + provider - V1 live (ADR 0022)
-│   │   ├── stooq.py        daily price CSV parse + provider - retained, blocked (ADR 0022)
-│   │   └── fama_french.py
+│   │   ├── stooq.py        daily price CSV parse + provider - retained,
+│   │   │                   blocked for live use (ADR 0022); excluded from the
+│   │   │                   three return-based analytics endpoints (QS-06)
+│   │   └── french_factors.py  Ken French daily FF3+RF CSV parse + provider
+│   ├── calendar.py         XNYS session validity + return-adjacency continuity
+│   │                       checks (QS-01 / ADR 0006) - deliberately outside
+│   │                       quant/, since the pure engine is calendar-agnostic
 │   ├── reference.py        SEC-label -> exchange-code map (listed-only in V1),
 │   │                       CIK/ticker normalisation, curated-only asset-type
 │   ├── security_seed.py    fetch -> normalise -> upsert -> record run
 │   ├── prices.py           RawPriceBar -> canonical price frame + drop reasons
 │   ├── validation.py       Pandera PRICE_BAR_SCHEMA + validate_price_bars()
+│   │                       (includes the XNYS-session check, QS-01)
+│   ├── factors.py          RawFactorReturn -> canonical factor frame
+│   │                       (percent -> decimal, missing-sentinel rejection)
+│   ├── factor_ingest.py    fetch -> normalise -> validate -> persist + run
+│   │                       record for the daily FF3 + RF dataset (2B.1)
 │   ├── spot_checks.py      NVDA split + dividend-back-adjustment checks
-│   ├── canonical_metrics.py  ordered US-GAAP tag lists per displayed metric
 │   └── ingest.py           fetch -> normalise -> validate -> persist + run record (1D)
 ├── db/
 │   ├── base.py             DeclarativeBase (+ constraint naming convention)
 │   ├── session.py          engine + sessionmaker + get_session dependency
 │   ├── models/             security, price_bar, factor_return,
-│   │                       fundamental_fact, data_ingestion_run
+│   │                       data_ingestion_run
 │   └── repositories/       securities (upsert + search/get_by_ticker),
-│                           prices (upsert + get_price_bars)
+│                           prices (upsert + get_price_bars), factors (upsert +
+│                           get_factor_series/get_factor_panel/existing_factor_names)
 └── jobs/
-    └── cli.py              seed-securities (1B); ingest-prices (1D) ...
+    └── cli.py              seed-securities (1B); ingest-prices (1D);
+                             ingest-factors (2B.1)
 ```
 
 Packages for portfolio, backtesting, filings, AI and auth are **not created**
@@ -409,10 +437,11 @@ whose denominator has zero variance is reported `{..., status: "undefined"}`.
 
 ---
 
-## 7. Minimum database schema (MVP)
+## 7. Database schema
 
-Five tables. One extension (`pg_trgm`, for ticker/name search). Full column
-lists and the rationale for what is intentionally *absent* are in
+**Current (implemented; migration head is `0003`).** Four tables, one
+extension (`pg_trgm`, for ticker/name search). Full column lists and the
+rationale for what is intentionally *absent* are in
 [ADR 0004](./decisions/0004-postgresql-and-provenance-fields.md),
 [ADR 0011](./decisions/0011-security-id-as-universal-foreign-key.md),
 [ADR 0012](./decisions/0012-total-return-via-vendor-adjusted-close.md),
@@ -423,25 +452,38 @@ lists and the rationale for what is intentionally *absent* are in
 |-----------------------|-----------------------------------------------------|--------------------------------------------|
 | `security`            | Reference data for the searchable US-equity universe, seeded from SEC (ADR 0021). Internal `id` PK; **all FKs reference `security_id`, never `ticker`**. `exchange` is a MIC-style code **normalised from the SEC exchange label** (single-source, not verified listing metadata); V1 is exchange-listed only (OTC excluded). `asset_type` / `cik` are **nullable** - set only when reliably determinable, never guessed. | -                                          |
 | `price_bar`           | Daily OHLCV per security. Both raw `close` and vendor `adj_close` stored. | `source`, `ingested_at`; PK `(security_id, trade_date, source)` |
-| `factor_return`       | Daily Fama-French factor returns (`mkt_rf`, `smb`, `hml`, `rf`), decimal daily returns (source percent / 100). `frequency` column keeps monthly factors possible later. No FK to `security` - factors are market-wide. | `source` (`kenneth_french`), `ingested_at`; PK `(factor_name, frequency, trade_date, source)` |
-| `fundamental_fact`    | Point-in-time company facts from SEC EDGAR. Restatements inserted as new rows; resolved metrics record which tag/accession they used. | `filed_date` (mandatory), `accession_no`, `form`, `taxonomy`, `tag`, `unit`, `source`, `ingested_at` |
+| `factor_return`       | Daily Fama-French factor returns (`mkt_rf`, `smb`, `hml`, `rf`), decimal daily returns (source percent / 100). `frequency` column keeps monthly factors possible later. No FK to `security` - factors are market-wide. Read by both the analytics endpoint (`rf`) and the factors endpoint (all four - Phase 3B, implemented). | `source` (`kenneth_french`), `ingested_at`; PK `(factor_name, frequency, trade_date, source)` |
 | `data_ingestion_run`  | Audit row per ingestion invocation (status, rows, error, time range). | is the provenance record                   |
 
-Migration order: **0001** `security`, `price_bar`, `data_ingestion_run`,
-`pg_trgm` (Phase 1A) -> **0002** `security.asset_type` nullable (Phase 1B,
-ADR 0021) -> **0003 (M2)** `factor_return` (Phase 2B.1, *complete*) -> **M3**
-`fundamental_fact` (Phase 3).
+Migration order (all applied; current head): **0001** `security`, `price_bar`,
+`data_ingestion_run`, `pg_trgm` (Phase 1A) -> **0002** `security.asset_type`
+nullable (Phase 1B, ADR 0021) -> **0003** `factor_return` (Phase 2B.1).
+
+**Planned, not yet built** - no migration, no model, no table exists for this
+today; adding it is future (fundamentals) scope, not part of the Phase 0-3B
+MVP:
+
+| Table              | Purpose                                             | Key provenance columns                     |
+|--------------------|-----------------------------------------------------|--------------------------------------------|
+| `fundamental_fact` | Point-in-time company facts from SEC EDGAR. Restatements inserted as new rows; resolved metrics record which tag/accession they used. | `filed_date` (mandatory), `accession_no`, `form`, `taxonomy`, `tag`, `unit`, `source`, `ingested_at` |
+
+Its migration would be **M3** when that phase starts (§10) - not yet numbered
+or scheduled.
 
 ---
 
-## 8. API surface (end of Phase 3)
+## 8. API surface (through Phase 3B; QS-10)
 
-All under `/api/v1`. Every analytics response embeds an `assumptions` object and
-may report individual metrics as suppressed with a structured reason (§5).
+Every route actually implemented is served at the root, like `/health` - there
+is no `/api/v1` prefix anywhere in the codebase. (An early sketch of this
+document assumed one; it was never adopted, and every phase since has
+consistently mounted its routers at the root - see `main.py`.) Every analytics
+response embeds an `assumptions` object and may report individual metrics as
+suppressed with a structured reason (§5).
 
-> Phase 1E ships the first three rows as **read-only** routes served at the root
-> (like `/health`), not yet under `/api/v1`: `GET /securities?q=`,
-> `GET /securities/{ticker}`, `GET /securities/{ticker}/prices?start&end&source`.
+> Phase 1E ships the first three rows as **read-only** routes: `GET
+> /securities?q=`, `GET /securities/{ticker}`,
+> `GET /securities/{ticker}/prices?start&end&source`.
 > `/prices` returns a single provider's series (defaulting to `price_provider`)
 > and never merges sources. Prices are exact `NUMERIC(18,6)` / `Decimal` in the
 > DB and domain layer, converted to `float` only at the JSON boundary, so the
@@ -459,18 +501,21 @@ may report individual metrics as suppressed with a structured reason (§5).
 > end, so they serialise as JSON numbers. No `benchmark` / `window` query
 > params: beta is always vs SPY, and the window is plain `start`/`end` dates.
 
+Every route below is actually implemented and reachable today (Phase 0-3B).
+`/risk` and `/fundamentals` were early sketches for later phases and were
+never built - fundamentals is not required for this MVP and remains
+deliberately deferred (§9); there is no fundamentals table, ingestion, or
+router anywhere in the codebase.
+
 | Method & path                                   | Purpose                                                        |
 |-------------------------------------------------|---------------------------------------------------------------|
-| `GET /securities?query=`                        | Search the seeded universe (trigram on ticker + name).        |
+| `GET /securities?q=&limit=&offset=`             | Search the seeded universe (trigram on ticker + name); `q` omitted lists the universe page. |
 | `GET /securities/{ticker}`                      | Security profile.                                             |
-| `GET /securities/{ticker}/prices?start&end`     | Historical daily bars.                                        |
-| `GET /securities/{ticker}/analytics?start&end&source` | Return summary / volatility / Sharpe / max drawdown / CAPM beta (vs SPY) / 1-day historical VaR & ES at 95% and 99% + `assumptions`. One source, adjusted close, per-metric `status`. Sharpe & beta read the persisted Kenneth French `RF` (Phase 2B.1); `unavailable` only when RF (or SPY, for beta) is not persisted. Shipped in Phase 2B / 2B.1. |
-| `GET /securities/{ticker}/risk?confidence&level` | 1-day historical VaR / ES detail (95% and 99%).              |
-| `GET /securities/{ticker}/fundamentals`         | Revenue, earnings, growth, market cap, P/E, forward P/E, P/S. Each value resolved via the canonical-metric mapping and tagged with `tag`, `period_end`, `filed_date`, `accession_no`; **returned as `unavailable` (with a reason) when no mapped tag is present** - never guessed. |
-| `GET /securities/{ticker}/factors?start&end&source` | The SPY CAPM regression and the FF3 regression (Mkt-RF/SMB/HML), both returned together with Newey-West (HAC) standard errors, t-stats, p-values, R², and `hac_lags`. Per-model `status` (`ok` / `insufficient_observations` / `undefined` / `unavailable`); `assumptions.capm_vs_ff3_note` states explicitly that the Mkt-RF coefficient is **not** the SPY CAPM beta. No `model` query param (ADR 0023). Shipped in Phase 3B. |
-| `GET /compare?tickers=A,B,...&start&end&source` | 2-8 distinct tickers -> one N-way inner-joined return panel -> base-100 normalized performance (every aligned return compounded, none divided away) + Pearson correlation matrix + `observations_used`, `aligned_start`, `aligned_end`. Flat provenance fields (no nested `assumptions`). `status`: `ok` / `insufficient_observations` (panel < `MIN_OBS_COMPARISON` = 60) / `unavailable` (any ticker has < 2 persisted bars, lists every offender). Shipped in Phase 3A. |
-
-`/health` (liveness) is served at the root, outside `/api/v1`.
+| `GET /securities/{ticker}/prices?start&end&source&limit&offset` | Historical daily bars, one provider's series, never merged. `source` accepts `tiingo` or `stooq` (defaults to `QUANTSCOPE_PRICE_PROVIDER`). |
+| `GET /securities/{ticker}/analytics?start&end&source` | Return summary / volatility / Sharpe / max drawdown / CAPM beta (vs SPY) / 1-day historical VaR & ES at 95% and 99% + `assumptions`. One source, adjusted close, per-metric `status`. Sharpe & beta read the persisted Kenneth French `RF` (Phase 2B.1); `unavailable` only when RF (or SPY, for beta) is not persisted. `source` accepts `tiingo` only - Stooq is rejected here, explicit or configured-default (QS-06 / RA-02; ADR 0022). Shipped in Phase 2B / 2B.1. |
+| `GET /securities/{ticker}/factors?start&end&source` | The SPY CAPM regression and the FF3 regression (Mkt-RF/SMB/HML), both returned together with Newey-West (HAC) standard errors, t-stats, p-values, R², and `hac_lags`. Per-model `status` (`ok` / `insufficient_observations` / `undefined` / `unavailable`); `assumptions.capm_vs_ff3_note` states explicitly that the Mkt-RF coefficient is **not** the SPY CAPM beta. No `model` query param (ADR 0023). `source` accepts `tiingo` only, same as `/analytics` (QS-06 / RA-02). Shipped in Phase 3B. |
+| `GET /compare?tickers=A,B,...&start&end&source` | 2-8 distinct tickers -> one N-way inner-joined return panel -> base-100 normalized performance (every aligned return compounded, none divided away) + Pearson correlation matrix + `observations_used`, `aligned_start`, `aligned_end`. Flat provenance fields (no nested `assumptions`). `status`: `ok` / `insufficient_observations` (panel < `MIN_OBS_COMPARISON` = 60, including when calendar-gap suppression alone leaves zero usable returns for a ticker that does have persisted history - RA-03) / `unavailable` (any ticker has < 2 persisted bars at all, lists every offender). `source` accepts `tiingo` only, same as `/analytics` (QS-06 / RA-02). Shipped in Phase 3A. |
+| `GET /health`                                   | Liveness check.                                                |
 
 ---
 
@@ -513,7 +558,7 @@ Monorepo layout; `docker-compose` (db + backend + frontend); `uv` / `pnpm`
 tooling; `justfile`; Ruff, mypy (strict on `quant`), pytest, `import-linter`
 contract; GitHub Actions CI; pre-commit; Alembic wired with **no migration
 yet**; FastAPI app factory + `/health`; Next.js shell with the TanStack Query
-provider; `.env.example`; README; `docs/architecture.md` + ADRs 0001-0022.
+provider; `.env.example`; README; `docs/architecture.md` + ADRs 0001-0023.
 
 ### Phase 1 - Search + market-data ingestion
 Delivered in sub-phases 1A-1F. Each is reviewed and approved before the next
@@ -593,6 +638,18 @@ Delivered in sub-phases.
   SPY) is persisted with enough overlap - `insufficient_observations` /
   `undefined` / `unavailable` otherwise, per ADR 0017 / ADR 0013. No frontend;
   no FF3 regression yet.
+
+### Phase 3 - Comparison, correlation, fundamentals, factor regression
+
+- **3A** *(complete)* - `quant/comparison` + `quantscope.services.comparison`
+  + `GET /compare`: 2-8 distinct tickers on one N-way inner-joined return
+  panel (never pairwise), base-100 normalized performance, and a Pearson
+  correlation matrix, with `observations_used`/`aligned_start`/`aligned_end`
+  and a flat `status` (`ok` / `insufficient_observations` /
+  `unavailable`) - no nested `assumptions` block (a deliberately flatter
+  shape than `/analytics`). Frontend Comparison tab: a ticker-chip picker
+  (2-8 securities), the normalized-performance chart, and a correlation
+  table. No migration.
 - **3B** *(complete)* - `quant/factors`: the SPY CAPM regression and the FF3
   regression (Mkt-RF/SMB/HML), both OLS with Newey-West (HAC) inference (ADR
   0017 addendum, 2026-09-05), reusing `factor_return` /
@@ -605,14 +662,25 @@ Delivered in sub-phases.
   coefficient table (factor / estimate / HAC SE / t-stat / p-value), no
   chart. Rolling factor betas, FF5, momentum, and drawdown/rolling
   time-series endpoints remain out of scope (§9) - not part of Phase 3B.
+- **Release-remediation passes** *(complete)* - two independent-audit
+  remediation passes over Phases 0-3B, recorded in `docs/decisions/` rather
+  than as their own roadmap phase: **QS-01..QS-10** (XNYS session-continuity
+  enforcement, drawdown peak-date truthfulness, RF/factor provenance
+  distinctions, Stooq excluded from return-based endpoints, CI frontend
+  tests, stale-doc fixes) and **RA-01..RA-05** (stable current-date-
+  independent XNYS calendar bounds, closing the configured-default-provider
+  Stooq bypass, consistent `insufficient_observations` for zero valid
+  returns across analytics/compare/factors, an independently-computed HAC
+  golden-test reference, and this documentation reconciliation pass).
 
-### Phase 3 - Comparison, correlation, fundamentals, factor regression
-Comparison (3A) and factor regression (3B, see above) are complete. Remaining:
-SEC EDGAR fundamentals ingestion (`filed_date`, `accession_no`);
-**canonical-metric mapping layer** (ordered US-GAAP tag sets per displayed
-metric; `unavailable` rather than guessed); on-the-fly valuation ratios.
-Frontend: correlation heatmap, fundamentals tables, dashboard polish pass.
-**Migration M3.**
+**Not yet started** (this MVP's only remaining phase-3 scope): SEC EDGAR
+fundamentals ingestion (`filed_date`, `accession_no`); a **canonical-metric
+mapping layer** (ordered US-GAAP tag sets per displayed metric; `unavailable`
+rather than guessed); on-the-fly valuation ratios; a frontend correlation
+heatmap, fundamentals tables, and a dashboard polish pass; **migration M3**.
+Fundamentals is deferred scope, not a requirement this MVP is currently
+missing - see §9's "known data limitations" and the "Beyond the MVP" list
+below for what is and is not expected to exist yet.
 
 ### Beyond the MVP (architecture-compatible, not scheduled here)
 Phase 4 portfolio analytics · Phase 5 backtesting engine · Phase 6 SEC filings

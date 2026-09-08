@@ -18,7 +18,7 @@ export function PricePanel({ ticker }: { ticker: string }) {
 
   const query = usePriceHistory(ticker, range);
   const bars = query.data?.results ?? [];
-  const resolvedSource = query.data?.source ?? "tiingo";
+  const resolvedSource = query.data?.source ?? "—";
 
   return (
     <section aria-label="Price history">
@@ -48,11 +48,17 @@ export function PricePanel({ ticker }: { ticker: string }) {
           </label>
           <span className="qs-source" data-testid="price-source">
             Source: {resolvedSource} · Adjusted close
+            {query.isPlaceholderData && (
+              <span className="qs-refreshing" data-testid="price-refreshing">
+                {" "}
+                · Refreshing…
+              </span>
+            )}
           </span>
         </div>
       </div>
 
-      <div className="qs-chart">
+      <div className={query.isPlaceholderData ? "qs-chart qs-stale" : "qs-chart"}>
         {query.isLoading && <div className="qs-skel" style={{ height: 480 }} aria-label="Loading price history" />}
 
         {query.isError && (

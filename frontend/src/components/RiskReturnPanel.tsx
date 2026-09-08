@@ -49,11 +49,17 @@ export function RiskReturnPanel({ ticker }: { ticker: string }) {
         <div className="qs-controls__right">
           <span className="qs-source" data-testid="analytics-source">
             Source: {analytics?.source ?? "—"} · Adjusted close
+            {query.isPlaceholderData && (
+              <span className="qs-refreshing" data-testid="analytics-refreshing">
+                {" "}
+                · Refreshing…
+              </span>
+            )}
           </span>
         </div>
       </div>
 
-      <div className="qs-analytics">
+      <div className={query.isPlaceholderData ? "qs-analytics qs-stale" : "qs-analytics"}>
         {query.isLoading && (
           <div className="qs-skel" style={{ height: 240 }} aria-label="Loading risk and return analytics" />
         )}

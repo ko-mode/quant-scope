@@ -229,4 +229,20 @@ describe("ComparisonPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /retry/i }));
     expect(refetch).toHaveBeenCalled();
   });
+
+  it("shows a visible Refreshing indicator while placeholder data is displayed (QS-07)", () => {
+    useComparison.mockReturnValue(
+      idleQuery({ isSuccess: true, isPlaceholderData: true, data: comparisonFixture() }),
+    );
+    render(<ComparisonPanel ticker="NVDA" />);
+    fireEvent.click(screen.getByTestId("add-ticker"));
+    expect(screen.getByTestId("comparison-refreshing").textContent).toContain("Refreshing");
+  });
+
+  it("does not show the Refreshing indicator for fresh (non-placeholder) data", () => {
+    useComparison.mockReturnValue(idleQuery({ isSuccess: true, data: comparisonFixture() }));
+    render(<ComparisonPanel ticker="NVDA" />);
+    fireEvent.click(screen.getByTestId("add-ticker"));
+    expect(screen.queryByTestId("comparison-refreshing")).toBeNull();
+  });
 });

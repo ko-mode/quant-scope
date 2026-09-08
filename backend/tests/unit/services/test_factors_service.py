@@ -15,10 +15,12 @@ import datetime
 from decimal import Decimal
 from typing import cast
 
+import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from sqlalchemy.orm import Session
 
+from quantscope.api.factors_schemas import FactorModelResult
 from quantscope.db.models import FactorReturn, PriceBar, Security
 from quantscope.quant import FactorRegressionResult, InsufficientObservations, UndefinedResult
 from quantscope.quant.factors import RegressionCoefficient
@@ -37,6 +39,17 @@ def _bar(day: str, adj_close: str, close: str = "999.0") -> PriceBar:
         close=Decimal(close),
         adj_close=Decimal(adj_close),
     )
+
+
+def _xnys_dates(start: str, n: int) -> pd.DatetimeIndex:
+    """``n`` genuine, gap-free XNYS sessions from ``start`` - unlike
+    ``pd.bdate_range``, which includes US market holidays (QS-01). The real
+    service now excludes any return spanning a missing session, so fixtures
+    that flow through it must be calendar-continuous to keep their exact
+    observation counts meaningful."""
+    cal = xcals.get_calendar("XNYS")
+    first = cal.date_to_session(start, direction="next")
+    return pd.DatetimeIndex(cal.sessions_window(first, n))
 
 
 def _factor(name: str, day: str, value: str) -> FactorReturn:
@@ -60,9 +73,23 @@ def test_factor_series_builds_a_named_float_series() -> None:
     assert list(series) == [0.0012, -0.0005]
 
 
-def test_load_daily_risk_free_none_when_nothing_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_daily_risk_free_none_when_never_ingested_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: [])
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: set())
     assert svc._load_daily_risk_free(_SESSION, start=None, end=None) is None
+
+
+def test_load_daily_risk_free_empty_series_when_ingested_but_window_has_no_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # QS-03: rf IS ingested for this source, just not in the requested window.
+    monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: [])
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: {"rf"})
+    series = svc._load_daily_risk_free(_SESSION, start=None, end=None)
+    assert series is not None
+    assert len(series) == 0
 
 
 def test_load_daily_risk_free_builds_series_when_rows_exist(
@@ -89,12 +116,23 @@ def test_load_ff3_factor_panel_groups_by_factor_name(monkeypatch: pytest.MonkeyP
     assert list(panel["smb"]) == [0.0005]
 
 
-def test_load_ff3_factor_panel_omits_a_factor_with_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_ff3_factor_panel_always_has_all_three_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    # QS-03: a factor with no rows in the window (but possibly ingested
+    # globally) maps to an *empty* Series, not an absent key - the caller
+    # uses _globally_missing_ff3_factors, not dict membership, to detect
+    # genuine absence.
     rows = [_factor("mkt_rf", "2024-01-02", "0.001"), _factor("smb", "2024-01-02", "0.0005")]
     monkeypatch.setattr(svc, "get_factor_panel", lambda session, **kw: rows)
     panel = svc._load_ff3_factor_panel(_SESSION, start=None, end=None)
-    assert set(panel) == {"mkt_rf", "smb"}
-    assert "hml" not in panel
+    assert set(panel) == {"mkt_rf", "smb", "hml"}
+    assert len(panel["hml"]) == 0
+
+
+def test_globally_missing_ff3_factors_reports_only_never_ingested_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: {"mkt_rf", "smb"})
+    assert svc._globally_missing_ff3_factors(_SESSION) == ["hml"]
 
 
 # --------------------------------------------------------------------------- #
@@ -104,14 +142,15 @@ def test_resolve_spy_returns_unavailable_when_benchmark_security_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: None)
-    returns, reason = svc._resolve_spy_returns(
+    result = svc._resolve_spy_returns(
         _SESSION,
         source="tiingo",
         start=None,
         end=None,
     )
-    assert returns is None
-    assert reason == "benchmark_security_not_found"
+    assert isinstance(result, FactorModelResult)
+    assert result.status == "unavailable"
+    assert result.reason == "benchmark_security_not_found"
 
 
 def test_resolve_spy_returns_unavailable_when_benchmark_has_thin_history(
@@ -120,31 +159,54 @@ def test_resolve_spy_returns_unavailable_when_benchmark_has_thin_history(
     spy = Security(id=99, ticker="SPY", name="SPY", exchange="XNAS")
     monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: spy)
     monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: [_bar("2024-01-02", "10")])
-    returns, reason = svc._resolve_spy_returns(
+    result = svc._resolve_spy_returns(
         _SESSION,
         source="tiingo",
         start=None,
         end=None,
     )
-    assert returns is None
-    assert reason == "benchmark_price_history_unavailable"
+    assert isinstance(result, FactorModelResult)
+    assert result.status == "unavailable"
+    assert result.reason == "benchmark_price_history_unavailable"
+
+
+def test_resolve_spy_returns_insufficient_not_unavailable_when_only_adjacency_is_gapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # SPY-01: SPY has >= 2 bars, but its one possible adjacency spans a
+    # missing XNYS session - price history is not missing, so this must be
+    # `insufficient_observations` (observed 0), never `unavailable`.
+    spy = Security(id=99, ticker="SPY", name="SPY", exchange="XNAS")
+    spy_bars = [_bar("2024-01-02", "400"), _bar("2024-01-04", "401")]  # Tue, Thu - Wed missing
+    monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: spy)
+    monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: spy_bars)
+    result = svc._resolve_spy_returns(
+        _SESSION,
+        source="tiingo",
+        start=None,
+        end=None,
+    )
+    assert isinstance(result, FactorModelResult)
+    assert result.status == "insufficient_observations"
+    assert result.observations_used == 0
+    assert result.required == svc.MIN_OBS_CAPM_REGRESSION
+    assert result.reason is None
 
 
 def test_resolve_spy_returns_ok_when_history_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    dates = pd.bdate_range("2023-01-02", periods=5)
+    dates = _xnys_dates("2023-01-02", 5)
     spy = Security(id=99, ticker="SPY", name="SPY", exchange="XNAS")
     spy_bars = [_bar(str(d.date()), str(100.0 + i)) for i, d in enumerate(dates)]
     monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: spy)
     monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: spy_bars)
-    returns, reason = svc._resolve_spy_returns(
+    result = svc._resolve_spy_returns(
         _SESSION,
         source="tiingo",
         start=None,
         end=None,
     )
-    assert reason is None
-    assert returns is not None
-    assert len(returns) == 4
+    assert not isinstance(result, FactorModelResult)
+    assert len(result) == 4
 
 
 # --------------------------------------------------------------------------- #
@@ -199,6 +261,10 @@ def test_compute_ticker_factors_both_unavailable_when_price_history_too_thin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: [_bar("2024-01-02", "10")])
+    # RF is now checked unconditionally, even though price history is thin
+    # (QS-03) - mock it minimally so the call does not hit a real database.
+    monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: [])
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: set())
     security = Security(id=1, ticker="NVDA", name="NVIDIA", exchange="XNAS")
     response = svc.compute_ticker_factors(
         _SESSION,
@@ -211,12 +277,90 @@ def test_compute_ticker_factors_both_unavailable_when_price_history_too_thin(
     assert response.capm.reason == "asset_price_history_unavailable"
     assert response.ff3.status == "unavailable"
     assert response.ff3.reason == "asset_price_history_unavailable"
+    # RF was genuinely never ingested here either.
+    assert response.assumptions.rf_source == "not_ingested"
+
+
+def test_compute_ticker_factors_thin_price_history_still_reports_rf_truthfully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # QS-03 (Part B): RF IS ingested, but the asset's own price history is too
+    # thin to compute either model. assumptions.rf_source must reflect that RF
+    # was actually checked and found - never "not_ingested" merely because the
+    # *asset* has too little history.
+    monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: [_bar("2024-01-02", "10")])
+    monkeypatch.setattr(
+        svc, "get_factor_series", lambda session, **kw: [_factor("rf", "2024-01-02", "0.00003")]
+    )
+    security = Security(id=1, ticker="NVDA", name="NVIDIA", exchange="XNAS")
+    response = svc.compute_ticker_factors(
+        _SESSION, security=security, source="tiingo", start=None, end=None
+    )
+    assert response.capm.status == "unavailable"
+    assert response.capm.reason == "asset_price_history_unavailable"
+    assert response.assumptions.rf_source == "kenneth_french_daily"
+
+
+def test_compute_ticker_factors_both_insufficient_when_all_adjacencies_gapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RA-03 (was QS-01's empty-series guard): exactly 2 price bars whose one
+    # possible adjacency spans a missing XNYS session - an empty gap-filtered
+    # return series despite >= 2 bars actually being persisted. Price history
+    # is not missing, so this must not claim "unavailable" - it is reported
+    # the same way services.analytics reports the identical situation for its
+    # own return series: insufficient_observations, observed = 0. Never a
+    # crash from feeding an empty series into capm_regression/ff3_regression.
+    price_bars = [_bar("2024-01-02", "100"), _bar("2024-01-04", "101")]  # Tue, Thu - Wed missing
+    monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: price_bars)
+    monkeypatch.setattr(
+        svc, "get_factor_series", lambda session, **kw: [_factor("rf", "2024-01-02", "0.00003")]
+    )
+    security = Security(id=1, ticker="NVDA", name="NVIDIA", exchange="XNAS")
+    response = svc.compute_ticker_factors(
+        _SESSION, security=security, source="tiingo", start=None, end=None
+    )
+    assert response.capm.status == "insufficient_observations"
+    assert response.capm.observations_used == 0
+    assert response.capm.required == svc.MIN_OBS_CAPM_REGRESSION
+    assert response.ff3.status == "insufficient_observations"
+    assert response.ff3.observations_used == 0
+    assert response.ff3.required == svc.MIN_OBS_FF3_REGRESSION
+
+
+def test_compute_ticker_factors_both_insufficient_when_rf_ingested_but_window_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dates = _xnys_dates("2023-01-02", 130)
+    price_bars = [_bar(str(d.date()), str(100.0 + i * 0.1)) for i, d in enumerate(dates)]
+    monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: price_bars)
+    # rf is ingested for this source, just not in the requested window.
+    monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: [])
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: {"rf"})
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("should not query SPY/factors when the rf window is empty")
+
+    monkeypatch.setattr(svc, "get_security_by_ticker", _boom)
+    monkeypatch.setattr(svc, "get_factor_panel", _boom)
+
+    security = Security(id=1, ticker="NVDA", name="NVIDIA", exchange="XNAS")
+    response = svc.compute_ticker_factors(
+        _SESSION, security=security, source="tiingo", start=None, end=None
+    )
+    assert response.capm.status == "insufficient_observations"
+    assert response.capm.required == 126
+    assert response.capm.observations_used == 0
+    assert response.ff3.status == "insufficient_observations"
+    assert response.ff3.required == 250
+    assert response.ff3.observations_used == 0
+    assert response.assumptions.rf_source == "kenneth_french_daily"
 
 
 def test_compute_ticker_factors_both_unavailable_when_rf_missing_and_never_queries_spy_or_factors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dates = pd.bdate_range("2023-01-02", periods=130)
+    dates = _xnys_dates("2023-01-02", 130)
     price_bars = [_bar(str(d.date()), str(100.0 + i * 0.1)) for i, d in enumerate(dates)]
 
     def _boom(*args: object, **kwargs: object) -> object:
@@ -224,6 +368,7 @@ def test_compute_ticker_factors_both_unavailable_when_rf_missing_and_never_queri
 
     monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: price_bars)
     monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: [])
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: set())
     monkeypatch.setattr(svc, "get_security_by_ticker", _boom)
     monkeypatch.setattr(svc, "get_factor_panel", _boom)
 
@@ -245,7 +390,7 @@ def test_compute_ticker_factors_both_unavailable_when_rf_missing_and_never_queri
 def test_compute_ticker_factors_ff3_unavailable_when_one_factor_missing_capm_unaffected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dates = pd.bdate_range("2023-01-02", periods=130)
+    dates = _xnys_dates("2023-01-02", 130)
     price_bars = [_bar(str(d.date()), str(100.0 + i * 0.1)) for i, d in enumerate(dates)]
     rf_rows = [_factor("rf", str(d.date()), "0.00003") for d in dates]
     spy = Security(id=99, ticker="SPY", name="SPY", exchange="XNAS")
@@ -262,6 +407,9 @@ def test_compute_ticker_factors_ff3_unavailable_when_one_factor_missing_capm_una
     monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: rf_rows)
     monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: spy)
     monkeypatch.setattr(svc, "get_factor_panel", lambda session, **kw: factor_rows)
+    # hml was never ingested for this source at all (not merely absent from
+    # this window) - the other two FF3 factors were.
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: {"mkt_rf", "smb"})
 
     security = Security(id=1, ticker="NVDA", name="NVIDIA", exchange="XNAS")
     response = svc.compute_ticker_factors(
@@ -277,7 +425,7 @@ def test_compute_ticker_factors_ff3_unavailable_when_one_factor_missing_capm_una
 
 
 def test_compute_ticker_factors_full_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    dates = pd.bdate_range("2023-01-02", periods=260)
+    dates = _xnys_dates("2023-01-02", 260)
     pattern = [0.01, -0.008, 0.006, -0.011, 0.009]
     asset_path = [100.0]
     for i in range(1, 260):
@@ -309,6 +457,9 @@ def test_compute_ticker_factors_full_happy_path(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: rf_rows)
     monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: spy)
     monkeypatch.setattr(svc, "get_factor_panel", lambda session, **kw: factor_rows)
+    monkeypatch.setattr(
+        svc, "existing_factor_names", lambda session, **kw: {"mkt_rf", "smb", "hml"}
+    )
 
     security = Security(id=1, ticker="NVDA", name="NVIDIA", exchange="XNAS")
     response = svc.compute_ticker_factors(

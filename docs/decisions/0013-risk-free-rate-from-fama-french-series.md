@@ -78,3 +78,47 @@ resolved:
   4 factors, 1926-07-01 to 2026-06-30) with zero dropped rows; a re-run
   inserted 0 / updated 0 / left 105,096 unchanged, confirming idempotency
   against the real file.
+
+## Addendum (2026-09-07, release-remediation pass - QS-03)
+
+`_load_daily_risk_free` (and the equivalent Mkt-RF/SMB/HML loading in
+`services/factors.py`) previously returned the same `None` - and therefore the
+same `status: "unavailable", reason: "risk_free_series_not_ingested"` - for
+two genuinely different conditions: (a) `rf` (or a factor) has **never been
+ingested for any date, anywhere** (`just ingest-factors` was never run), and
+(b) `rf`/the factor **is ingested**, but the specific requested window has no
+overlapping rows (e.g. a `start`/`end` predating 1926-07-01, or a future
+window beyond the last ingested date). These call for different user-facing
+statuses under the existing vocabulary (ADR 0017's addendum): (a) is a missing
+*input*, correctly `unavailable`; (b) is a well-formed request against
+existing data that happens to be short for this window, which is exactly what
+`insufficient_observations` (not `unavailable`) already means everywhere
+else in the codebase.
+
+`db/repositories/factors.py::existing_factor_names(session, *, source,
+factor_names)` - a new, cheap `SELECT DISTINCT factor_name` query with no date
+filter - answers "has this factor ever been ingested from this source at
+all?", independent of any requested window. Both loaders now branch three
+ways instead of two:
+
+1. Not in `existing_factor_names` at all -> `unavailable`,
+   `reason: "risk_free_series_not_ingested"` (or the equivalent per-factor
+   reason in `services/factors.py`) - the factor has genuinely never been
+   ingested.
+2. In `existing_factor_names`, but the window query returns zero rows ->
+   `insufficient_observations` - the factor exists globally, this window just
+   doesn't overlap it.
+3. In `existing_factor_names`, with rows in the window -> proceeds to the
+   regression/Sharpe/beta computation as before, which applies its own
+   `MIN_OBSERVATIONS` gate on the resulting joined-panel length exactly as it
+   always has.
+
+`services/factors.py` additionally fixed a related ordering bug: RF is now
+loaded and checked *before* the `len(prices) < 2` short-circuit, matching the
+order `services/analytics.py` already used - previously a missing-price case
+could mask a missing-RF case that would otherwise have been reported first.
+
+This is a service-layer status-mapping refinement only; the underlying
+decision (RF read from `factor_return` with `factor_name = 'rf'`, no dedicated
+table) is unchanged, and no migration or schema change was needed -
+`existing_factor_names` reads the same table this ADR already mandates.

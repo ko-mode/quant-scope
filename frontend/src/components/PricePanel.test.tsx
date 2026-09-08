@@ -109,4 +109,26 @@ describe("PricePanel", () => {
     expect(screen.getByRole("alert")).toBeTruthy();
     expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy();
   });
+
+  it("shows an em dash, never a fabricated 'tiingo', before the source is known (QS-08)", () => {
+    hookState({ isLoading: true });
+    render(<PricePanel ticker="NVDA" />);
+    expect(screen.getByTestId("price-source").textContent).toBe("Source: — · Adjusted close");
+  });
+
+  it("shows a visible Refreshing indicator while placeholder data is displayed (QS-07)", () => {
+    hookState({
+      isSuccess: true,
+      isPlaceholderData: true,
+      data: result({ results: [priceBar("2024-01-02")] }),
+    });
+    render(<PricePanel ticker="NVDA" />);
+    expect(screen.getByTestId("price-refreshing").textContent).toContain("Refreshing");
+  });
+
+  it("does not show the Refreshing indicator for fresh (non-placeholder) data", () => {
+    hookState({ isSuccess: true, data: result({ results: [priceBar("2024-01-02")] }) });
+    render(<PricePanel ticker="NVDA" />);
+    expect(screen.queryByTestId("price-refreshing")).toBeNull();
+  });
 });

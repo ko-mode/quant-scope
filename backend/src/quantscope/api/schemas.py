@@ -14,14 +14,63 @@ from __future__ import annotations
 
 import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, get_args
 
+from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_serializer
+
+from quantscope.config import get_settings
 
 #: Price providers the API accepts as a ``source`` filter - the set
 #: ``quantscope.data.ingest.build_price_provider`` knows. An unknown value is a
 #: 422 at request validation.
 PriceSource = Literal["tiingo", "stooq"]
+
+#: Price providers accepted by the three *return-based* analytics endpoints
+#: (analytics, compare, factors) - QS-06. Stooq serves one ambiguous ``Close``
+#: with no documented adjustment rule (ADR 0022): ``adj_close`` for it is not a
+#: verified total-return series the way Tiingo's CRSP-adjusted ``adjClose`` is.
+#: Excluding it here means an unverified series is never silently presented as
+#: adjusted-close/total-return analytics; ``source=stooq`` still works for the
+#: raw ``/prices`` endpoint, which makes no such methodological claim. An
+#: unrecognised or excluded value is a 422 at request validation - no new
+#: provider-capability framework, just a narrower accepted type.
+QuantitativeSource = Literal["tiingo"]
+
+_QUANTITATIVE_SOURCES = frozenset(get_args(QuantitativeSource))
+
+
+def resolve_quantitative_source(explicit: QuantitativeSource | None) -> QuantitativeSource:
+    """Resolve+validate the ``source`` for analytics/compare/factors (RA-02).
+
+    FastAPI's ``QuantitativeSource | None`` query-parameter type only
+    validates a value the caller actually *passed* as ``source=...``; it
+    never sees ``get_settings().price_provider`` (a plain, unconstrained
+    ``str``), which is what every one of these three routers falls back to
+    when ``source`` is omitted. Without this check, a deployment configured
+    with ``QUANTSCOPE_PRICE_PROVIDER=stooq`` could reach analytics/compare/
+    factors with Stooq's unverified-adjustment series simply by never passing
+    ``source`` at all - the one path QS-06's query-parameter-only Literal
+    restriction left open.
+
+    Every caller of this function passes the *already-FastAPI-validated*
+    query parameter as ``explicit`` and uses the return value, never the raw
+    settings/query value, as the source handed to the service layer - so the
+    resolved, validated source is what always reaches the quant/services
+    layer, not just what the caller happened to type in the URL.
+    """
+    resolved = explicit or get_settings().price_provider
+    if resolved not in _QUANTITATIVE_SOURCES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"price provider {resolved!r} is not permitted for this endpoint "
+                f"(QS-06): allowed sources are {sorted(_QUANTITATIVE_SOURCES)!r}. "
+                "Pass source=tiingo explicitly, or set "
+                "QUANTSCOPE_PRICE_PROVIDER=tiingo."
+            ),
+        )
+    return resolved  # type: ignore[return-value]
 
 
 class SecurityRead(BaseModel):
@@ -91,6 +140,8 @@ __all__ = [
     "PriceBarRead",
     "PriceHistoryResponse",
     "PriceSource",
+    "QuantitativeSource",
     "SecurityListResponse",
     "SecurityRead",
+    "resolve_quantitative_source",
 ]

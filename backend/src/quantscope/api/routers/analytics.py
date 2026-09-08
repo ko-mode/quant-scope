@@ -17,8 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
 from quantscope.api.analytics_schemas import AnalyticsResponse
-from quantscope.api.schemas import PriceSource
-from quantscope.config import get_settings
+from quantscope.api.schemas import QuantitativeSource, resolve_quantitative_source
 from quantscope.data.reference import normalize_ticker
 from quantscope.db.models import Security
 from quantscope.db.repositories.securities import get_security_by_ticker
@@ -56,8 +55,13 @@ def get_security_analytics(
     start: Annotated[datetime.date | None, Query(description="Inclusive ISO date.")] = None,
     end: Annotated[datetime.date | None, Query(description="Inclusive ISO date.")] = None,
     source: Annotated[
-        PriceSource | None,
-        Query(description="Price provider. Defaults to the configured price provider."),
+        QuantitativeSource | None,
+        Query(
+            description="Price provider. Defaults to the configured price provider. "
+            "Stooq is excluded (QS-06), including when only the configured "
+            "default provider would resolve to it (RA-02): its adjusted-close "
+            "is unverified, see ADR 0022."
+        ),
     ] = None,
 ) -> AnalyticsResponse:
     security = _resolve_security(session, ticker)
@@ -66,7 +70,7 @@ def get_security_analytics(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"start {start.isoformat()} is after end {end.isoformat()}",
         )
-    resolved_source = source or get_settings().price_provider
+    resolved_source = resolve_quantitative_source(source)
     return compute_ticker_analytics(
         session, security=security, source=resolved_source, start=start, end=end
     )

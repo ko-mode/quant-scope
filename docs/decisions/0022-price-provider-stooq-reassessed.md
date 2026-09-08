@@ -139,3 +139,45 @@ confirmed the adoption empirically:
 | Local DB storage is permitted; redistribution is not | Tiingo API overview "internal and personal use only… may not redistribute" |
 | Dividend-adjustment factor is exactly `1 − dividend/close` | third-party docs mirror only; **not** verbatim-confirmed from a live Tiingo page - the empirical check does not depend on the exact factor |
 | Credit card not required for the free tier | widely reported; not restated on the pricing page fetched |
+
+## Addendum (2026-09-07, release-remediation pass - QS-06)
+
+Point 3 above kept the Stooq adapter as a working, testable
+`DailyPriceProvider` implementation, and `GET /securities/{ticker}/prices`
+(`api/routers/securities.py`) still accepts `source=stooq` - it returns
+whatever raw bars Stooq's offline CSV parser can produce, with no total-return
+claim attached, which is exactly the "raw provenance-tagged price data" this
+ADR's Findings section documents Stooq as being (a single ambiguous `Close`,
+no dividend adjustment). That endpoint never asserted the data was
+total-return-quality; the caller sees `source: "stooq"` and can judge it on
+its own terms.
+
+`/securities/{ticker}/analytics`, `/compare` (mounted at the root, not under
+`/securities` - RA-05), and `/securities/{ticker}/factors`, however, all
+compute or display statistics
+that assume a total-return-adjusted series (ADR 0012) - annualised volatility,
+Sharpe, CAPM/FF3 beta and alpha, drawdown, correlation. Stooq's single `Close`
+column, per this ADR's own Findings, has "no documented adjustment rule" and
+is not established to be dividend-adjusted the way Tiingo's `adjClose` was
+empirically verified to be (see "Live verification" above). Accepting
+`source=stooq` on these three endpoints would silently compute total-return
+statistics from a series with no total-return guarantee, misrepresenting the
+result's provenance without any signal to the caller.
+
+Rather than build a general provider-capability framework (e.g. a
+`supports_total_return: bool` flag per provider, consulted generically by
+every analytics-bearing route) - which is more machinery than a V1 with two
+providers, one of which is already the sole live-verified total-return source,
+justifies - the fix is a literal type restriction:
+`QuantitativeSource = Literal["tiingo"]` (`api/schemas.py`), used as the
+`source` query-parameter type on exactly these three routers. A request for
+`source=stooq` (or any value besides `tiingo`) on any of them now fails
+FastAPI's own request validation with `422`, before the router body ever
+runs - not a `200` with a suppressed/undefined metric, since the problem is
+an invalid request, not thin data. `/prices` is untouched and keeps its
+broader `PriceSource` type (`tiingo | stooq`), since it makes no total-return
+claim.
+
+If a second total-return-adjusted provider is added later, this becomes
+`Literal["tiingo", "<new-provider>"]` - a one-line, self-documenting change at
+the same three call sites, with no framework to design or migrate.

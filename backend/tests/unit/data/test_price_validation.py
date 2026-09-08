@@ -62,6 +62,12 @@ def test_clean_frame_passes() -> None:
         ([{"open": "0"}], "non_positive_price", "open"),
         ([{"high": "100", "low": "110"}], "impossible_high_low", None),
         ([{"volume": "-5"}], "negative_volume", "volume"),
+        ([{"trade_date": "2024-06-08"}], "non_session_trade_date", "trade_date"),  # Saturday
+        (
+            [{"trade_date": "2024-06-19"}],
+            "non_session_trade_date",
+            "trade_date",
+        ),  # Juneteenth holiday
     ],
 )
 def test_row_level_rejections(rows: list[dict[str, str]], code: str, column: str | None) -> None:
@@ -71,6 +77,25 @@ def test_row_level_rejections(rows: list[dict[str, str]], code: str, column: str
     if column is not None:
         assert any(e.column == column and e.code == code for e in result.errors)
     assert len(result.valid) == 0  # the only row was rejected
+
+
+def test_non_session_row_rejected_but_real_sessions_in_the_same_frame_survive() -> None:
+    # QS-01: a bad (non-session) row is rejected on its own - it never poisons
+    # an otherwise-valid history.
+    frame = _frame(
+        [
+            {"trade_date": "2024-06-10"},  # Monday - real session
+            {"trade_date": "2024-06-08", "close": "999", "adj_close": "999"},  # Saturday
+            {"trade_date": "2024-06-11", "close": "121.0", "adj_close": "121.0"},  # Tuesday
+        ]
+    )
+    result = validate_price_bars(frame)
+    assert "non_session_trade_date" in result.error_counts
+    assert len(result.valid) == 2
+    assert {pd.Timestamp(d).date().isoformat() for d in result.valid["trade_date"]} == {
+        "2024-06-10",
+        "2024-06-11",
+    }
 
 
 def test_duplicate_trade_date_source_rejected_and_both_rows_excluded() -> None:

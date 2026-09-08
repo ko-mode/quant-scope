@@ -50,6 +50,17 @@ def build_factor_provider(
 
 @dataclass(frozen=True, slots=True)
 class FactorIngestReport:
+    """QS-04: ``validation_rejected`` and ``outside_requested_window`` are
+    reported separately, never combined into one ``dropped`` figure. The
+    Kenneth French file is always fetched in full (it is not date-filterable
+    at the source - see the module docstring), so an ordinary bounded
+    ingestion (e.g. ``--start 2015-01-01`` against a file starting in 1926)
+    excludes the overwhelming majority of fetched rows by design, with zero
+    data-quality problems; conflating that with genuine validation failures
+    (a missing-value sentinel, a non-finite value) made every bounded run look
+    like it had massive data-quality issues when it had none.
+    """
+
     run_id: int | None
     status: str
     source: str
@@ -57,7 +68,8 @@ class FactorIngestReport:
     range_end: datetime.date | None
     fetched: int = 0
     normalized: int = 0
-    dropped: int = 0
+    validation_rejected: int = 0
+    outside_requested_window: int = 0
     inserted: int = 0
     updated: int = 0
     unchanged: int = 0
@@ -73,7 +85,8 @@ class FactorIngestReport:
             "range_end": self.range_end.isoformat() if self.range_end else None,
             "fetched": self.fetched,
             "normalized": self.normalized,
-            "dropped": self.dropped,
+            "validation_rejected": self.validation_rejected,
+            "outside_requested_window": self.outside_requested_window,
             "inserted": self.inserted,
             "updated": self.updated,
             "unchanged": self.unchanged,
@@ -108,19 +121,20 @@ def run_factor_ingestion(
         extra={"source": source, "start": str(start), "end": str(end), "dry_run": dry_run},
     )
 
-    def _fetch_and_validate() -> tuple[int, pd.DataFrame, dict[str, int]]:
+    def _fetch_and_validate() -> tuple[int, int, pd.DataFrame, dict[str, int]]:
         raw = provider.fetch_daily_factors()
         result = normalize_and_validate_factors(raw, source=source)
-        frame = result.valid
+        validated = result.valid
+        frame = validated
         if start is not None:
             frame = frame[frame["trade_date"] >= pd.Timestamp(start)]
         if end is not None:
             frame = frame[frame["trade_date"] <= pd.Timestamp(end)]
         frame = frame.reset_index(drop=True)
-        return len(raw), frame, result.error_counts
+        return len(raw), len(validated), frame, result.error_counts
 
     if dry_run:
-        fetched, frame, reason_counts = _fetch_and_validate()
+        fetched, validated_count, frame, reason_counts = _fetch_and_validate()
         lo, hi = _bounds(frame)
         report = FactorIngestReport(
             run_id=None,
@@ -130,7 +144,8 @@ def run_factor_ingestion(
             range_end=hi,
             fetched=fetched,
             normalized=len(frame),
-            dropped=fetched - len(frame),
+            validation_rejected=fetched - validated_count,
+            outside_requested_window=validated_count - len(frame),
             reason_counts=reason_counts,
         )
         logger.info("factor_ingestion.dry_run_complete", extra=report.as_dict())
@@ -149,7 +164,7 @@ def run_factor_ingestion(
     run_id = run.id
 
     try:
-        fetched, frame, reason_counts = _fetch_and_validate()
+        fetched, validated_count, frame, reason_counts = _fetch_and_validate()
         counts = upsert_factor_returns(session, source=source, frame=frame)
         lo, hi = _bounds(frame)
         run.rows_written = counts.written
@@ -177,7 +192,8 @@ def run_factor_ingestion(
         range_end=hi,
         fetched=fetched,
         normalized=len(frame),
-        dropped=fetched - len(frame),
+        validation_rejected=fetched - validated_count,
+        outside_requested_window=validated_count - len(frame),
         inserted=counts.inserted,
         updated=counts.updated,
         unchanged=counts.unchanged,

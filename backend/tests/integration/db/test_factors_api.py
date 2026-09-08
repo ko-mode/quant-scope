@@ -21,7 +21,7 @@ import math
 from decimal import Decimal
 from typing import Any
 
-import pandas as pd
+import exchange_calendars as xcals
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -49,7 +49,14 @@ def _adj_path(n: int, *, base: float = 100.0, pattern: list[float] = _R_PATTERN)
 
 
 def _bdates(n: int, start: str = _START) -> list[datetime.date]:
-    return [ts.date() for ts in pd.bdate_range(start, periods=n)]
+    """``n`` genuine, gap-free XNYS sessions from ``start`` - unlike
+    ``pd.bdate_range``, which includes US market holidays that are not real
+    trading sessions. The factors service now excludes any return spanning a
+    missing session (QS-01), so fixtures must be calendar-continuous to keep
+    their exact observation-count assertions meaningful."""
+    cal = xcals.get_calendar("XNYS")
+    first = cal.date_to_session(start, direction="next")
+    return [ts.date() for ts in cal.sessions_window(first, n)]
 
 
 def _sec(session: Session, ticker: str, name: str) -> int:
@@ -150,6 +157,45 @@ def _get(client: TestClient, ticker: str, **params: str) -> dict[str, Any]:
     return body
 
 
+# --------------------------------------------------------------------------- #
+# QS-01: a session gap in the asset's own history narrows both regressions'
+# aligned samples - it is never bridged into a fabricated multi-day return.
+# --------------------------------------------------------------------------- #
+def test_asset_session_gap_narrows_both_regressions_without_bridging(
+    api_client: TestClient, session: Session
+) -> None:
+    sec = _sec(session, "GAPCO", "Gap Co.")
+    full_dates = _bdates(260)
+    gap_pos = 100  # interior session never persisted for GAPCO only
+    kept_dates = full_dates[:gap_pos] + full_dates[gap_pos + 1 :]
+    kept_adj = _adj_path(260)
+    kept_adj = kept_adj[:gap_pos] + kept_adj[gap_pos + 1 :]
+    for day, value in zip(kept_dates, kept_adj, strict=True):
+        session.add(
+            PriceBar(
+                security_id=sec,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("999"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    _insert_bars(session, spy, "tiingo", 260, adj_values=_adj_path(260, pattern=_SPY_PATTERN))
+    session.flush()
+    _insert_rf(session, full_dates)
+    _insert_ff3_factors(session, full_dates)
+
+    body = _get(api_client, "GAPCO")
+    # 259 bars -> 258 adjacent pairs -> 1 excluded (spans the missing session)
+    # -> 257 usable returns; SPY/RF/factors are fully continuous over the same
+    # window, so the aligned sample for both models is exactly GAPCO's 257.
+    assert body["capm"]["status"] == "ok"
+    assert body["capm"]["observations_used"] == 257
+    assert body["ff3"]["status"] == "ok"
+    assert body["ff3"]["observations_used"] == 257
+
+
 def _walk_floats(node: Any) -> list[float]:
     """Every float leaf in a JSON-decoded body - used to assert no NaN/Infinity."""
     if isinstance(node, float):
@@ -246,6 +292,41 @@ def test_missing_price_history_both_unavailable(api_client: TestClient, session:
     assert body["ff3"]["reason"] == "asset_price_history_unavailable"
 
 
+def test_exactly_two_bars_spanning_a_gap_is_insufficient_not_unavailable(
+    api_client: TestClient, session: Session
+) -> None:
+    """Pathological edge case: exactly 2 asset price bars, and the one
+    possible adjacency between them spans a missing XNYS session - an empty
+    gap-filtered return series despite >= 2 bars actually being persisted.
+    RA-03: price history is not missing, so this must report
+    `insufficient_observations` / `observations_used: 0` (the same outcome
+    services.analytics already reports for its own return series), never
+    `unavailable` and never a crash."""
+    sec = _sec(session, "TWOGAP", "Two Bar Gap Co.")
+    full_dates = _bdates(3)
+    for day, value in zip([full_dates[0], full_dates[2]], [100.0, 101.0], strict=True):
+        session.add(
+            PriceBar(
+                security_id=sec,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("999"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    session.flush()
+    _insert_rf(session, full_dates)
+    _insert_ff3_factors(session, full_dates)
+
+    body = _get(api_client, "TWOGAP")
+    assert body["capm"]["status"] == "insufficient_observations"
+    assert body["capm"]["observations_used"] == 0
+    assert body["capm"]["required"] == 126
+    assert body["ff3"]["status"] == "insufficient_observations"
+    assert body["ff3"]["observations_used"] == 0
+    assert body["ff3"]["required"] == 250
+
+
 def test_missing_rf_leaves_both_unavailable(api_client: TestClient, session: Session) -> None:
     sec = _sec(session, "NORF", "No RF Co.")
     dates = _insert_bars(session, sec, "tiingo", 130)
@@ -259,6 +340,55 @@ def test_missing_rf_leaves_both_unavailable(api_client: TestClient, session: Ses
     assert body["ff3"]["status"] == "unavailable"
     assert body["ff3"]["reason"] == "risk_free_series_not_ingested"
     assert body["assumptions"]["rf_source"] == "not_ingested"
+
+
+# --------------------------------------------------------------------------- #
+# QS-03: "never ingested" vs "not in the requested window"
+# --------------------------------------------------------------------------- #
+def test_rf_ingested_outside_requested_window_is_insufficient_not_unavailable(
+    api_client: TestClient, session: Session
+) -> None:
+    sec = _sec(session, "RFWINDOW", "RF Window Co.")
+    dates = _insert_bars(session, sec, "tiingo", 260)
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    _insert_bars(session, spy, "tiingo", 260, adj_values=_adj_path(260, pattern=_SPY_PATTERN))
+    _insert_ff3_factors(session, dates)
+    # rf IS ingested for this source - but only at the very first date, well
+    # outside the narrower window requested below.
+    _insert_rf(session, dates[:1])
+
+    body = _get(api_client, "RFWINDOW", start=dates[100].isoformat(), end=dates[259].isoformat())
+    assert body["capm"]["status"] == "insufficient_observations"
+    assert body["capm"]["required"] == 126
+    assert body["capm"]["observations_used"] == 0
+    assert body["ff3"]["status"] == "insufficient_observations"
+    assert body["ff3"]["required"] == 250
+    assert body["ff3"]["observations_used"] == 0
+    # rf's real provenance is reported truthfully - it is ingested, just not
+    # covering this window - never conflated with "not ingested at all".
+    assert body["assumptions"]["rf_source"] == "kenneth_french_daily"
+
+
+def test_factor_ingested_outside_requested_window_is_insufficient_not_unavailable(
+    api_client: TestClient, session: Session
+) -> None:
+    sec = _sec(session, "FACTORWINDOW", "Factor Window Co.")
+    dates = _insert_bars(session, sec, "tiingo", 260)
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    _insert_bars(session, spy, "tiingo", 260, adj_values=_adj_path(260, pattern=_SPY_PATTERN))
+    _insert_rf(session, dates)
+    # hml IS ingested for this source - but only at the very first date.
+    _insert_factor(session, "mkt_rf", dates, _MKT_PATTERN)
+    _insert_factor(session, "smb", dates, _SMB_PATTERN)
+    _insert_factor(session, "hml", dates[:1], _HML_PATTERN)
+
+    body = _get(
+        api_client, "FACTORWINDOW", start=dates[100].isoformat(), end=dates[259].isoformat()
+    )
+    assert body["capm"]["status"] == "ok"  # unaffected - CAPM does not use hml
+    assert body["ff3"]["status"] == "insufficient_observations"
+    assert body["ff3"]["required"] == 250
+    assert body["ff3"]["observations_used"] == 0
 
 
 def test_missing_spy_leaves_capm_unavailable_ff3_unaffected(
@@ -288,6 +418,44 @@ def test_spy_without_price_history_leaves_capm_unavailable(
     body = _get(api_client, "SPYNOHIST")
     assert body["capm"]["status"] == "unavailable"
     assert body["capm"]["reason"] == "benchmark_price_history_unavailable"
+    assert body["ff3"]["status"] == "ok"
+
+
+def test_spy_gapped_to_zero_returns_leaves_capm_insufficient_not_unavailable(
+    api_client: TestClient, session: Session
+) -> None:
+    """SPY-01: SPY has >= 2 persisted bars, but its one possible adjacency
+    spans a missing XNYS session, leaving zero usable benchmark returns.
+    SPY's price history is not missing, so `unavailable` would misrepresent
+    this - CAPM must report `insufficient_observations` / `observations_used:
+    0`, against the same CAPM-regression gate as a thin RF window. FF3 (which
+    never touches SPY) is unaffected."""
+    sec = _sec(session, "SPYGAP", "Spy Gap Co.")
+    dates = _insert_bars(session, sec, "tiingo", 260)
+    _insert_rf(session, dates)
+    _insert_ff3_factors(session, dates)
+
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    full_dates = _bdates(3)  # three consecutive sessions
+    # Keep only the first and third - the middle (real) session is missing,
+    # so the only adjacency between the two kept SPY bars spans a gap.
+    for day, value in zip([full_dates[0], full_dates[2]], [400.0, 401.0], strict=True):
+        session.add(
+            PriceBar(
+                security_id=spy,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("400.000000"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    session.flush()
+
+    body = _get(api_client, "SPYGAP")
+    assert body["capm"]["status"] == "insufficient_observations"
+    assert body["capm"]["observations_used"] == 0
+    assert body["capm"]["required"] == 126
+    assert body["capm"]["reason"] is None
     assert body["ff3"]["status"] == "ok"
 
 
@@ -356,6 +524,28 @@ def test_price_sources_are_never_merged_factor_source_is_independent(
     default = _get(api_client, "NVDA")
     assert default["capm"]["status"] == "ok"
     assert default["ff3"]["status"] == "ok"
+
+
+def test_stooq_source_is_rejected_for_factors(
+    api_client: TestClient, universe: dict[str, Any]
+) -> None:
+    # QS-06: Stooq's single, ambiguous Close has no documented adjustment rule
+    # (ADR 0022) - rejected at request validation, never silently regressed on.
+    resp = api_client.get("/securities/NVDA/factors", params={"source": "stooq"})
+    assert resp.status_code == 422
+
+
+def test_configured_stooq_default_is_rejected_when_source_is_omitted(
+    api_client: TestClient,
+    universe: dict[str, Any],
+    configured_stooq_provider: None,
+) -> None:
+    # RA-02: a deployment configured with QUANTSCOPE_PRICE_PROVIDER=stooq must
+    # not reach /factors by omitting `source`, inheriting Stooq through the
+    # settings fallback FastAPI's query-parameter validation never sees.
+    resp = api_client.get("/securities/NVDA/factors")
+    assert resp.status_code == 422
+    assert "stooq" in resp.json()["detail"].lower()
 
 
 # --------------------------------------------------------------------------- #

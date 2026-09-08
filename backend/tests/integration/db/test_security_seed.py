@@ -197,3 +197,24 @@ def test_dry_run_writes_nothing(seed_session: Session) -> None:
     assert report.normalized == 3
     assert _count(seed_session, Security) == 0
     assert _count(seed_session, DataIngestionRun) == 0
+
+
+class _BoomProvider:
+    """QS-05: a provider whose fetch itself fails - network error, malformed
+    JSON, SEC API downtime, etc."""
+
+    source_name = "test_boom"
+
+    def fetch_securities(self) -> list[RawSecurityRecord]:
+        raise RuntimeError("simulated provider fetch failure")
+
+
+def test_provider_fetch_failure_still_records_a_failed_run(seed_session: Session) -> None:
+    with pytest.raises(RuntimeError, match="simulated provider fetch failure"):
+        run_security_seed(seed_session, _BoomProvider())
+
+    run = seed_session.execute(select(DataIngestionRun)).scalar_one()
+    assert run.status == "failed"
+    assert run.source == "test_boom"
+    assert "simulated provider fetch failure" in (run.error or "")
+    assert _count(seed_session, Security) == 0

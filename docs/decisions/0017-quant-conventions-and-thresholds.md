@@ -181,3 +181,40 @@ alpha's annualisation status - none of which the original decision or its
 - **CAPM regression gate**: `MIN_OBS_CAPM_REGRESSION = MIN_OBS_BETA = 126` -
   reused rather than a new number, since it is the same regression family as
   the existing beta. FF3's `MIN_OBS_FF3_REGRESSION = 250` is unchanged.
+
+## Addendum (2026-09-07, release-remediation pass - QS-02, drawdown peak date)
+
+The "Drawdown recovery" clause in the 2026-09-04 addendum above states the
+running peak/trough/recovery dates but did not settle what `peak_date` should
+be in the specific case where the maximum drawdown's governing peak is the
+**pre-return wealth anchor of 1.0** itself - i.e. the return series opens with
+a loss, so wealth never rises back to 1.0 at any date *within*
+`returns.index` before the trough. That anchor is real (it is the wealth
+immediately before the first return) but has no date inside the return
+series's own index, so reporting a `peak_date` for it requires a date the
+quant engine was never given.
+
+`drawdown_analysis` now takes an optional `anchor_date: pd.Timestamp | None`
+keyword. The service layer (`services/analytics.py`) supplies the price date
+immediately preceding `returns.index[0]` - i.e. `prices.index[0]`, one date
+earlier, already available from the same price series the service loaded to
+compute `returns` in the first place, so no additional query or architectural
+change was needed to obtain it. When the running peak is the anchor,
+`peak_date` is reported as this truthful preceding price date rather than a
+placeholder.
+
+`anchor_date` is optional, not required, because `quant/drawdown.py` is also
+called with a bare return series in unit tests and in any future context that
+does not have a price index at hand: when omitted, `peak_date` is `None`,
+meaning specifically "the peak precedes the first available return
+observation" - a distinct condition from `max_drawdown == 0.0` (no drawdown
+episode occurred at all), which continues to report `peak_date = None` for
+its own, different reason. The two `None` cases are never conflated in code:
+`max_drawdown` alone distinguishes them, and both are documented and tested
+independently (`backend/tests/unit/quant/test_drawdown.py`).
+
+The running maximum was also corrected to include the anchor value:
+`wealth.cummax().clip(lower=1.0)` rather than a bare `wealth.cummax()`, so
+that a return series opening with one or more losses is correctly recognised
+as itself being a drawdown from the anchor, not understated by comparing
+wealth only against its own (already-diminished) running maximum.

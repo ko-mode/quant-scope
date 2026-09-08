@@ -14,7 +14,7 @@ import json
 from decimal import Decimal
 from typing import Any
 
-import pandas as pd
+import exchange_calendars as xcals
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -34,7 +34,14 @@ def _adj_path(n: int, *, base: float = 100.0, pattern: list[float] = _A_PATTERN)
 
 
 def _bdates(n: int) -> list[datetime.date]:
-    return [ts.date() for ts in pd.bdate_range(_START, periods=n)]
+    """``n`` genuine, gap-free XNYS sessions from ``_START`` - unlike
+    ``pd.bdate_range``, which includes US market holidays that are not real
+    trading sessions. The comparison service now excludes any return spanning
+    a missing session (QS-01), so fixtures must be calendar-continuous to
+    keep their exact observation-count assertions meaningful."""
+    cal = xcals.get_calendar("XNYS")
+    first = cal.date_to_session(_START, direction="next")
+    return [ts.date() for ts in cal.sessions_window(first, n)]
 
 
 def _sec(session: Session, ticker: str, name: str) -> int:
@@ -100,6 +107,90 @@ def _get(client: TestClient, **params: str) -> dict[str, Any]:
     assert resp.status_code == 200, resp.text
     body: dict[str, Any] = resp.json()
     return body
+
+
+# --------------------------------------------------------------------------- #
+# QS-01: a per-ticker session gap narrows the aligned panel for that ticker
+# only - it is never bridged into a fabricated multi-day return for either
+# ticker, and the other ticker's own (gap-free) calendar is unaffected.
+# --------------------------------------------------------------------------- #
+def test_one_tickers_session_gap_narrows_the_aligned_panel_without_bridging(
+    api_client: TestClient, session: Session
+) -> None:
+    aapl = _sec(session, "GAPA", "Gap A Corp.")
+    gapb = _sec(session, "GAPB", "Gap B Corp.")
+    full_dates = _bdates(70)
+    gap_pos = 30  # interior session never persisted for GAPB only
+
+    for day, value in zip(full_dates, _adj_path(70, pattern=_A_PATTERN), strict=True):
+        session.add(
+            PriceBar(
+                security_id=aapl,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("999"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    b_dates = full_dates[:gap_pos] + full_dates[gap_pos + 1 :]
+    b_values = _adj_path(70, pattern=_B_PATTERN)
+    b_values = b_values[:gap_pos] + b_values[gap_pos + 1 :]
+    for day, value in zip(b_dates, b_values, strict=True):
+        session.add(
+            PriceBar(
+                security_id=gapb,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("999"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    session.flush()
+
+    body = _get(api_client, tickers="GAPA,GAPB")
+    assert body["status"] == "ok"
+    # GAPA: 70 bars, no gap -> 69 valid returns (dates[1..69]).
+    # GAPB: 69 bars (dates[30] missing) -> the dates[29]->dates[31] adjacency
+    # is excluded -> 67 valid returns (dates[1..29] + dates[32..69]).
+    # Aligned panel = intersection = GAPB's 67 dates (a strict subset of
+    # GAPA's 69) - dates[30] and dates[31] are both absent from the panel,
+    # even though GAPA itself has a perfectly valid return on dates[31].
+    assert body["observations_used"] == 67
+    assert body["aligned_start"] == full_dates[1].isoformat()
+    assert body["aligned_end"] == full_dates[69].isoformat()
+
+
+def test_ticker_with_exactly_two_bars_spanning_a_gap_is_insufficient_not_unavailable(
+    api_client: TestClient, session: Session
+) -> None:
+    """Pathological edge case: one ticker has exactly 2 price bars, and the
+    one possible adjacency between them spans a missing XNYS session - an
+    empty gap-filtered return series despite >= 2 bars actually being
+    persisted. RA-03: price history is not missing, so this must report
+    `insufficient_observations` / `observations_used: 0` (consistent with how
+    services.analytics already reports the identical situation), never
+    `unavailable`/`missing_price_history`, and never raise."""
+    good = _sec(session, "GOODCO", "Good Co.")
+    _insert_bars(session, good, "tiingo", 70)
+    twogap = _sec(session, "TWOGAP", "Two Bar Gap Co.")
+    full_dates = _bdates(3)
+    for day, value in zip([full_dates[0], full_dates[2]], [100.0, 101.0], strict=True):
+        session.add(
+            PriceBar(
+                security_id=twogap,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("999"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    session.flush()
+
+    body = _get(api_client, tickers="GOODCO,TWOGAP")
+    assert body["status"] == "insufficient_observations"
+    assert body["observations_used"] == 0
+    assert body["required"] == 60
+    assert body["unavailable_tickers"] is None
 
 
 def test_two_ticker_comparison_ok(api_client: TestClient, universe: dict[str, Any]) -> None:
@@ -197,12 +288,35 @@ def test_thin_overlap_is_insufficient_observations(
 
 
 def test_source_is_never_merged(api_client: TestClient, universe: dict[str, Any]) -> None:
-    # AAPL has 5 stooq bars; MSFT has none at all under stooq - proves the
-    # comparison never silently falls back to tiingo for the missing one.
-    body = _get(api_client, tickers="AAPL,MSFT", source="stooq")
-    assert body["source"] == "stooq"
-    assert body["status"] == "unavailable"
-    assert body["unavailable_tickers"] == ["MSFT"]
+    # AAPL also has 5 bars under "stooq" (inserted by the `universe` fixture);
+    # the default tiingo-sourced comparison must never merge them in.
+    body = _get(api_client, tickers="AAPL,MSFT")
+    assert body["source"] == "tiingo"
+    assert body["status"] == "ok"
+    assert body["observations_used"] == 99  # AAPL/MSFT's 100 tiingo bars each
+
+
+def test_stooq_source_is_rejected_for_compare(
+    api_client: TestClient, universe: dict[str, Any]
+) -> None:
+    # QS-06: Stooq's single, ambiguous Close has no documented adjustment rule
+    # (ADR 0022) - rejected at request validation, never silently compared.
+    resp = api_client.get("/compare", params={"tickers": "AAPL,MSFT", "source": "stooq"})
+    assert resp.status_code == 422
+
+
+def test_configured_stooq_default_is_rejected_when_source_is_omitted(
+    api_client: TestClient,
+    universe: dict[str, Any],
+    configured_stooq_provider: None,
+) -> None:
+    # RA-02: an explicit source=stooq is already a 422 (above); a deployment
+    # configured with QUANTSCOPE_PRICE_PROVIDER=stooq must not reach /compare
+    # by simply omitting `source`, inheriting Stooq through the settings
+    # fallback FastAPI's query-parameter validation never sees.
+    resp = api_client.get("/compare", params={"tickers": "AAPL,MSFT"})
+    assert resp.status_code == 422
+    assert "stooq" in resp.json()["detail"].lower()
 
 
 def test_requested_dates_propagate(api_client: TestClient, universe: dict[str, Any]) -> None:

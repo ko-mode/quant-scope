@@ -11,11 +11,13 @@ not implementation-derived, expectations.
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import numpy as np
 import pandas as pd
 import pytest
 import statsmodels.api as sm
+from scipy import stats as scipy_stats
 
 from quantscope.quant.factors import (
     FactorRegressionResult,
@@ -345,3 +347,177 @@ def test_regression_coefficient_field_shape() -> None:
         "ci_low",
         "ci_high",
     }
+
+
+# --------------------------------------------------------------------------- #
+# HAC golden-reference test (test-quality gap; independence tightened RA-04):
+# an independent NumPy Newey-West / Bartlett-kernel implementation, built from
+# the published formula alone - never by calling statsmodels, never by
+# calling quantscope.quant.factors.newey_west_lags, and never by reading
+# production's own out.hac_lags - verifies the production HAC standard
+# errors, t-stats, p-values and CI (both models) against a reference that
+# owes production nothing but its inputs.
+#
+# Formula (Newey & West 1987, Bartlett kernel, statsmodels' `use_correction`
+# small-sample adjustment - the exact configuration `_fit` uses):
+#
+#   beta_hat = (X'X)^-1 X'y                              (OLS, via lstsq)
+#   u_t = y_t - x_t'beta_hat                              (residuals)
+#   S = sum_t u_t^2 (x_t x_t')
+#       + sum_{l=1}^{L} w_l sum_{t=l+1}^n u_t u_{t-l} (x_t x_{t-l}' + x_{t-l} x_t')
+#       where w_l = 1 - l/(L+1)                           (Bartlett kernel)
+#   S *= n / (n - k)                                      (use_correction=True)
+#   Cov(beta_hat) = (X'X)^-1 S (X'X)^-1
+#
+# The Newey-West lag count L is *independently reproduced* here from the
+# locked formula's own published text - max(1, floor(4*(T/100)**(2/9))) - not
+# imported, not read off `out.hac_lags`. `out.hac_lags == _reference_lags(n)`
+# is itself one of the assertions below, so a production regression in either
+# the formula or the lag actually used would be caught, rather than the test
+# silently re-deriving its expectation from whatever production just did.
+# --------------------------------------------------------------------------- #
+def _reference_newey_west_lags(observations_used: int) -> int:
+    """Independent restatement of the locked Newey & West (1994) plug-in
+    bandwidth - deliberately duplicated from the formula text, not imported
+    from :func:`quantscope.quant.factors.newey_west_lags`, so this reference
+    cannot silently inherit a bug from the function it is meant to check."""
+    plugin_bandwidth: float = 4.0 * (observations_used / 100.0) ** (2.0 / 9.0)
+    return max(1, math.floor(plugin_bandwidth))
+
+
+def _hand_rolled_hac_ols(
+    y: np.ndarray, design: np.ndarray, *, lags: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Independent reference: OLS coefficients and their Newey-West/Bartlett
+    HAC covariance matrix, from the formula alone - no statsmodels, no
+    quantscope.quant.factors. Returns (coefficients, covariance_matrix)."""
+    n, k = design.shape
+    beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+    resid = y - design @ beta
+    xtx_inv = np.linalg.inv(design.T @ design)
+
+    meat = np.zeros((k, k))
+    for t in range(n):
+        xt = design[t]
+        meat += resid[t] ** 2 * np.outer(xt, xt)
+    for lag in range(1, lags + 1):
+        weight = 1.0 - lag / (lags + 1)
+        gamma = np.zeros((k, k))
+        for t in range(lag, n):
+            xt, xtl = design[t], design[t - lag]
+            gamma += resid[t] * resid[t - lag] * (np.outer(xt, xtl) + np.outer(xtl, xt))
+        meat += weight * gamma
+    meat *= n / (n - k)  # use_correction=True small-sample adjustment
+
+    cov = xtx_inv @ meat @ xtx_inv
+    return beta, cov
+
+
+def test_capm_regression_hac_matches_independent_newey_west_reference() -> None:
+    # A fixed, deterministic (seeded) dataset with AR(1)-autocorrelated
+    # residuals, so HAC and classical OLS standard errors meaningfully
+    # differ - a purely i.i.d.-noise fixture would not actually exercise the
+    # Bartlett-kernel weighting this test is meant to catch a regression in.
+    rng = np.random.default_rng(20260907)
+    n = 130
+    spy_excess = rng.normal(0.0, 0.01, n)
+    innovations = rng.normal(0.0, 0.008, n)
+    residual = np.zeros(n)
+    residual[0] = innovations[0]
+    for t in range(1, n):
+        residual[t] = 0.6 * residual[t - 1] + innovations[t]
+    alpha_true, beta_true = 0.0003, 0.9
+    asset_excess = alpha_true + beta_true * spy_excess + residual
+
+    # RA-04: a deterministic, non-zero, *varying* daily RF series - not the
+    # zero series used before. capm_regression must independently reconstruct
+    # `asset_excess`/`spy_excess` by subtracting this exact series from the
+    # raw asset/SPY returns it is handed; feeding it a non-trivial RF and
+    # comparing against a reference built from the true, pre-RF excess values
+    # actually exercises that subtraction rather than assuming it away.
+    rf_values = 0.00006 + 0.00002 * rng.standard_normal(n)
+
+    dates = _dates(n)
+    asset_returns = pd.Series(asset_excess + rf_values, index=dates)  # raw total return
+    spy_returns = pd.Series(spy_excess + rf_values, index=dates)  # raw total return
+    rf = pd.Series(rf_values, index=dates)
+
+    out = capm_regression(asset_returns, spy_returns, rf)
+    assert isinstance(out, FactorRegressionResult)
+
+    reference_lags = _reference_newey_west_lags(n)
+    design = np.column_stack([np.ones(n), spy_excess])
+    ref_beta, ref_cov = _hand_rolled_hac_ols(asset_excess, design, lags=reference_lags)
+    ref_se = np.sqrt(np.diag(ref_cov))
+    ref_t = ref_beta / ref_se
+    # HAC/robust covariance results use asymptotic normal inference
+    # (statsmodels' `use_t=False` for cov_type="HAC"), not the exact
+    # finite-sample t-distribution - HAC's own justification is asymptotic.
+    ref_p = 2.0 * scipy_stats.norm.sf(np.abs(ref_t))
+    ref_ci_low = ref_beta - scipy_stats.norm.ppf(0.975) * ref_se
+    ref_ci_high = ref_beta + scipy_stats.norm.ppf(0.975) * ref_se
+
+    assert out.hac_lags == reference_lags
+    for i, coef in enumerate(out.coefficients):
+        assert coef.estimate == pytest.approx(ref_beta[i], rel=1e-9)
+        assert coef.std_error == pytest.approx(ref_se[i], rel=1e-6)
+        assert coef.t_stat == pytest.approx(ref_t[i], rel=1e-6)
+        assert coef.p_value == pytest.approx(ref_p[i], rel=1e-4, abs=1e-12)
+        assert coef.ci_low == pytest.approx(ref_ci_low[i], rel=1e-6)
+        assert coef.ci_high == pytest.approx(ref_ci_high[i], rel=1e-6)
+
+
+def test_ff3_regression_hac_matches_independent_newey_west_reference() -> None:
+    # Same independent-reference doctrine, for the 4-coefficient FF3 design
+    # matrix (intercept + 3 factors), confirming the reference generalises
+    # beyond the single-regressor CAPM case.
+    rng = np.random.default_rng(20260907)
+    n = 260
+    mkt = rng.normal(0.0, 0.01, n)
+    smb = rng.normal(0.0, 0.006, n)
+    hml = rng.normal(0.0, 0.005, n)
+    innovations = rng.normal(0.0, 0.007, n)
+    residual = np.zeros(n)
+    residual[0] = innovations[0]
+    for t in range(1, n):
+        residual[t] = 0.5 * residual[t - 1] + innovations[t]
+    alpha_true, b_mkt, b_smb, b_hml = -0.0001, 1.05, 0.3, -0.2
+    asset_excess = alpha_true + b_mkt * mkt + b_smb * smb + b_hml * hml + residual
+
+    # RA-04: deterministic, non-zero, varying daily RF, exactly as for CAPM
+    # above - ff3_regression only subtracts RF from the asset's own return
+    # (the Mkt-RF/SMB/HML factors are already excess/factor returns and are
+    # used as-is); feeding a raw total-return asset series here exercises
+    # that one subtraction rather than assuming it away with RF = 0.
+    rf_values = 0.00004 + 0.000015 * rng.standard_normal(n)
+
+    dates = _dates(n)
+    asset_returns = pd.Series(asset_excess + rf_values, index=dates)  # raw total return
+    rf = pd.Series(rf_values, index=dates)
+    out = ff3_regression(
+        asset_returns,
+        pd.Series(mkt, index=dates),
+        pd.Series(smb, index=dates),
+        pd.Series(hml, index=dates),
+        rf,
+    )
+    assert isinstance(out, FactorRegressionResult)
+
+    reference_lags = _reference_newey_west_lags(n)
+    design = np.column_stack([np.ones(n), mkt, smb, hml])
+    ref_beta, ref_cov = _hand_rolled_hac_ols(asset_excess, design, lags=reference_lags)
+    ref_se = np.sqrt(np.diag(ref_cov))
+    ref_t = ref_beta / ref_se
+    # Asymptotic normal inference, matching HAC's own use_t=False convention.
+    ref_p = 2.0 * scipy_stats.norm.sf(np.abs(ref_t))
+    ref_ci_low = ref_beta - scipy_stats.norm.ppf(0.975) * ref_se
+    ref_ci_high = ref_beta + scipy_stats.norm.ppf(0.975) * ref_se
+
+    assert out.hac_lags == reference_lags
+    for i, coef in enumerate(out.coefficients):
+        assert coef.estimate == pytest.approx(ref_beta[i], rel=1e-9)
+        assert coef.std_error == pytest.approx(ref_se[i], rel=1e-6)
+        assert coef.t_stat == pytest.approx(ref_t[i], rel=1e-6)
+        assert coef.p_value == pytest.approx(ref_p[i], rel=1e-4, abs=1e-12)
+        assert coef.ci_low == pytest.approx(ref_ci_low[i], rel=1e-6)
+        assert coef.ci_high == pytest.approx(ref_ci_high[i], rel=1e-6)

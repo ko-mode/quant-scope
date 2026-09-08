@@ -1,9 +1,12 @@
 """Security-universe seeding: fetch -> normalise -> de-duplicate -> upsert, with
 the run recorded in ``data_ingestion_run`` (ADR 0003).
 
-The ``data_ingestion_run`` row is committed up front with ``status='running'``
-so a crash still leaves a trace; it is updated to ``success`` / ``partial`` on
-completion, or ``failed`` (in its own transaction) on error.
+For a real (non-dry) run, the ``data_ingestion_run`` row is committed up front
+with ``status='running'`` **before** ``fetch_securities()`` is even called, and
+fetch / normalise / persist all happen inside the same ``try`` (QS-05) - so a
+provider or parse failure still leaves a ``failed`` audit row, mirroring
+:mod:`quantscope.data.factor_ingest` and :mod:`quantscope.data.ingest` exactly,
+rather than no trace at all.
 """
 
 from __future__ import annotations
@@ -14,8 +17,8 @@ from dataclasses import asdict, dataclass, field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from quantscope.data.providers.base import SecurityReferenceProvider
-from quantscope.data.reference import normalize_records
+from quantscope.data.providers.base import RawSecurityRecord, SecurityReferenceProvider
+from quantscope.data.reference import NormalizationOutcome, normalize_records
 from quantscope.db.models import DataIngestionRun
 from quantscope.db.repositories.securities import upsert_securities
 
@@ -57,28 +60,37 @@ def run_security_seed(
     *,
     dry_run: bool = False,
 ) -> SeedReport:
+    """QS-05: for a real (non-dry) run, the ``data_ingestion_run`` row is
+    created and committed *before* ``fetch_securities()`` is even called, and
+    fetch/normalise happen inside the same ``try`` as persistence - mirroring
+    :func:`quantscope.data.factor_ingest.run_factor_ingestion` exactly - so a
+    provider or parse failure still leaves a ``failed`` audit row instead of
+    no trace at all.
+    """
     logger.info("security_seed.started", extra={"source": provider.source_name, "dry_run": dry_run})
 
-    raw = provider.fetch_securities()
-    outcome = normalize_records(raw)
-    logger.info(
-        "security_seed.normalized",
-        extra={
-            "fetched": len(raw),
-            "normalized": len(outcome.securities),
-            "rejected": len(outcome.rejected),
-            "reason_counts": outcome.reason_counts,
-        },
-    )
-    for item in outcome.rejected:
-        logger.warning(
-            "security_seed.rejected",
-            extra={"reason": item.reason, "raw": asdict(item.raw)},
+    def _fetch_and_normalize() -> tuple[list[RawSecurityRecord], NormalizationOutcome]:
+        raw = provider.fetch_securities()
+        outcome = normalize_records(raw)
+        logger.info(
+            "security_seed.normalized",
+            extra={
+                "fetched": len(raw),
+                "normalized": len(outcome.securities),
+                "rejected": len(outcome.rejected),
+                "reason_counts": outcome.reason_counts,
+            },
         )
-
-    status = "partial" if outcome.rejected else "success"
+        for item in outcome.rejected:
+            logger.warning(
+                "security_seed.rejected",
+                extra={"reason": item.reason, "raw": asdict(item.raw)},
+            )
+        return raw, outcome
 
     if dry_run:
+        raw, outcome = _fetch_and_normalize()
+        status = "partial" if outcome.rejected else "success"
         logger.info("security_seed.dry_run_complete", extra={"status": status})
         return SeedReport(
             run_id=None,
@@ -95,6 +107,8 @@ def run_security_seed(
     run_id = run.id
 
     try:
+        raw, outcome = _fetch_and_normalize()
+        status = "partial" if outcome.rejected else "success"
         counts = upsert_securities(session, outcome.securities)
         run.rows_written = counts.written
         run.status = status

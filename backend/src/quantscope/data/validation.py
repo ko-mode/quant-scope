@@ -13,6 +13,15 @@ V1 invariants (ADR 0006, 0012, 0021 lineage):
 * ``volume`` ``>= 0`` when present
 * ``high >= low``; ``high >= open/close``; ``low <= open/close`` when operands present
 * no duplicate ``(trade_date, source)``
+* ``trade_date`` is a real XNYS trading session (QS-01 / ADR 0006) - a
+  weekend or holiday date is rejected the same way a non-positive price is,
+  never silently persisted as a "daily" bar
+
+A row rejected here is simply absent from ``price_bar`` - this module never
+bridges a *missing* session (there is no row to reject for a date that was
+never provided at all). That case is handled downstream, once returns are
+computed, by :func:`quantscope.data.calendar.valid_return_adjacency_mask`,
+which excludes the specific return that would otherwise span the gap.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ from dataclasses import dataclass
 import pandas as pd
 import pandera.pandas as pa
 
+from quantscope.data.calendar import valid_session_mask
 from quantscope.data.prices import (
     PRICE_BAR_COLUMNS,
     NormalizedPrices,
@@ -35,6 +45,10 @@ from quantscope.data.providers.base import RawPriceBar
 def _positive() -> pa.Check:
     # A fresh Check instance per column - pandera does not support sharing one.
     return pa.Check.gt(0)
+
+
+def _valid_xnys_session() -> pa.Check:
+    return pa.Check(valid_session_mask, name="valid_xnys_session", element_wise=False)
 
 
 def _ohlc_bounds(df: pd.DataFrame) -> pd.Series:
@@ -54,7 +68,7 @@ def _unique_trade_date_source(df: pd.DataFrame) -> pd.Series:
 
 PRICE_BAR_SCHEMA = pa.DataFrameSchema(
     columns={
-        "trade_date": pa.Column("datetime64[ns]", nullable=False),
+        "trade_date": pa.Column("datetime64[ns]", nullable=False, checks=_valid_xnys_session()),
         "open": pa.Column("float64", nullable=True, checks=_positive()),
         "high": pa.Column("float64", nullable=True, checks=_positive()),
         "low": pa.Column("float64", nullable=True, checks=_positive()),
@@ -102,6 +116,8 @@ def _code_for(check: str, column: str | None) -> str:
         return "impossible_high_low"
     if check == "unique_trade_date_source":
         return "duplicate_trade_date_source"
+    if check == "valid_xnys_session":
+        return "non_session_trade_date"
     if "null" in check:
         return "missing_required_value"
     return "schema_violation"

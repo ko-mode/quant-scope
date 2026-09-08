@@ -70,6 +70,12 @@ export function FactorsPanel({ ticker }: { ticker: string }) {
         <div className="qs-controls__right">
           <span className="qs-source" data-testid="factors-source">
             Source: {data?.source ?? "—"} · Adjusted close
+            {query.isPlaceholderData && (
+              <span className="qs-refreshing" data-testid="factors-refreshing">
+                {" "}
+                · Refreshing…
+              </span>
+            )}
           </span>
         </div>
       </div>
@@ -91,7 +97,7 @@ export function FactorsPanel({ ticker }: { ticker: string }) {
       )}
 
       {query.isSuccess && data && (
-        <>
+        <div className={query.isPlaceholderData ? "qs-stale" : undefined}>
           <FactorModelSection id="capm" title="CAPM (vs SPY)" model={data.capm} />
           <FactorModelSection id="ff3" title="Fama-French 3-Factor" model={data.ff3} />
 
@@ -99,7 +105,7 @@ export function FactorsPanel({ ticker }: { ticker: string }) {
             {data.assumptions.capm_vs_ff3_note} {data.assumptions.alpha_note} Newey-West lag rule:{" "}
             {data.assumptions.hac_lag_rule}.
           </p>
-        </>
+        </div>
       )}
     </section>
   );

@@ -18,6 +18,7 @@ dependencies = [
     "pandera[pandas]>=0.22,<0.25",
     "scipy>=1.13,<2",
     "statsmodels>=0.14,<0.15",
+    "exchange-calendars>=4.5,<5",
 ]
 
 [project.scripts]
@@ -112,6 +113,16 @@ disallow_incomplete_defs = false
 [[tool.mypy.overrides]]
 # statsmodels ships no py.typed marker / stubs (Phase 3B, quant/factors.py).
 module = "statsmodels.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# exchange_calendars ships no py.typed marker / stubs (QS-01, data/calendar.py).
+module = "exchange_calendars.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# scipy ships no bundled stubs (HAC golden-reference test, test_factors.py).
+module = "scipy.*"
 ignore_missing_imports = true
 
 # -----------------------------------------------------------------------------

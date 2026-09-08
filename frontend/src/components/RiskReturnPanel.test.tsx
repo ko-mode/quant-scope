@@ -299,4 +299,16 @@ describe("RiskReturnPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /retry/i }));
     expect(refetch).toHaveBeenCalled();
   });
+
+  it("shows a visible Refreshing indicator while placeholder data is displayed (QS-07)", () => {
+    hookState({ isSuccess: true, isPlaceholderData: true, data: analyticsFixture() });
+    render(<RiskReturnPanel ticker="NVDA" />);
+    expect(screen.getByTestId("analytics-refreshing").textContent).toContain("Refreshing");
+  });
+
+  it("does not show the Refreshing indicator for fresh (non-placeholder) data", () => {
+    hookState({ isSuccess: true, data: analyticsFixture() });
+    render(<RiskReturnPanel ticker="NVDA" />);
+    expect(screen.queryByTestId("analytics-refreshing")).toBeNull();
+  });
 });

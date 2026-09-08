@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 from decimal import Decimal
 
+import exchange_calendars as xcals
 import pandas as pd
 import pytest
 
@@ -36,6 +37,18 @@ def _bar(day: str, adj_close: str, close: str = "999.0") -> PriceBar:
         close=Decimal(close),
         adj_close=Decimal(adj_close),
     )
+
+
+def _xnys_dates(start: str, n: int) -> pd.DatetimeIndex:
+    """``n`` genuine, gap-free XNYS sessions from ``start`` - unlike
+    ``pd.bdate_range``, which includes US market holidays that are not real
+    trading sessions (QS-01). Only needed where a fixture flows through
+    ``data.calendar.session_continuous_returns`` (the SPY leg of
+    ``_compute_beta``); other fixtures below pass a pre-built return Series
+    directly and are unaffected by calendar continuity."""
+    cal = xcals.get_calendar("XNYS")
+    first = cal.date_to_session(start, direction="next")
+    return pd.DatetimeIndex(cal.sessions_window(first, n))
 
 
 def _factor(day: str, value: str) -> FactorReturn:
@@ -66,9 +79,25 @@ def test_risk_free_series_builds_a_named_float_series() -> None:
     assert list(series) == [0.00008, 0.00009]
 
 
-def test_load_daily_risk_free_none_when_nothing_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_daily_risk_free_none_when_never_ingested_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: [])
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: set())
     assert svc._load_daily_risk_free(object(), start=None, end=None) is None  # type: ignore[arg-type]
+
+
+def test_load_daily_risk_free_empty_series_when_ingested_but_window_has_no_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # QS-03: rf IS ingested for this source (globally), just not in the
+    # requested window - an empty series, not None, so the quant layer's own
+    # gate reports insufficient_observations rather than "not ingested".
+    monkeypatch.setattr(svc, "get_factor_series", lambda session, **kw: [])
+    monkeypatch.setattr(svc, "existing_factor_names", lambda session, **kw: {"rf"})
+    series = svc._load_daily_risk_free(object(), start=None, end=None)  # type: ignore[arg-type]
+    assert series is not None
+    assert len(series) == 0
 
 
 def test_load_daily_risk_free_builds_series_when_rows_exist(
@@ -97,6 +126,18 @@ def test_compute_sharpe_delegates_to_the_engine_when_rf_present() -> None:
     assert metric.risk_free_basis == "daily_series"
 
 
+def test_compute_sharpe_is_insufficient_when_rf_is_empty_not_a_crash() -> None:
+    # QS-03 + the empty-series guard: rf is ingested (non-None) but has zero
+    # rows for this window - never fed into sharpe_ratio (its own validation
+    # raises on an empty series, reserved for a caller bug, not a thin one).
+    returns = pd.Series([0.01] * 130, index=pd.bdate_range("2023-01-02", periods=130))
+    rf = pd.Series([], dtype="float64", index=pd.DatetimeIndex([]))
+    metric = svc._compute_sharpe(returns, rf)
+    assert metric.status == "insufficient_observations"
+    assert metric.required == 126
+    assert metric.observations_used == 0
+
+
 def test_compute_beta_is_unavailable_when_rf_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     called = False
 
@@ -117,6 +158,36 @@ def test_compute_beta_is_unavailable_when_rf_is_none(monkeypatch: pytest.MonkeyP
     )
     assert metric.status == "unavailable"
     assert metric.reason == "risk_free_series_not_ingested"
+    assert not called
+
+
+def test_compute_beta_is_insufficient_when_rf_is_empty_and_never_queries_spy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # QS-03 + the empty-series guard: rf is ingested (non-None) but has zero
+    # rows for this window - never fed into capm_beta, and (mirroring the
+    # RF-is-None short circuit) SPY is never queried either.
+    called = False
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("should not query SPY when RF window is empty")
+
+    monkeypatch.setattr(svc, "get_security_by_ticker", _boom)
+    returns = pd.Series([0.01] * 130, index=pd.bdate_range("2023-01-02", periods=130))
+    rf = pd.Series([], dtype="float64", index=pd.DatetimeIndex([]))
+    metric = svc._compute_beta(
+        object(),  # type: ignore[arg-type]
+        asset_returns=returns,
+        source="tiingo",
+        start=None,
+        end=None,
+        rf=rf,
+    )
+    assert metric.status == "insufficient_observations"
+    assert metric.required == 126
+    assert metric.observations_used == 0
     assert not called
 
 
@@ -160,10 +231,38 @@ def test_compute_beta_is_unavailable_when_benchmark_has_thin_history(
     assert metric.reason == "benchmark_price_history_unavailable"
 
 
+def test_compute_beta_is_insufficient_not_unavailable_when_benchmarks_only_adjacency_is_gapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # SPY-01: SPY has >= 2 bars, but its one possible adjacency spans a
+    # missing XNYS session - an empty gap-filtered return series despite
+    # SPY's price history genuinely existing. `unavailable` would misrepresent
+    # that as missing history; this must be `insufficient_observations`,
+    # `observations_used == 0`, against the same beta gate as a thin RF series.
+    spy = Security(id=99, ticker="SPY", name="SPY", exchange="XNAS")
+    spy_bars = [_bar("2024-01-02", "100"), _bar("2024-01-04", "101")]  # Tue, Thu - Wed missing
+    monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: spy)
+    monkeypatch.setattr(svc, "get_all_price_bars", lambda session, **kw: spy_bars)
+    dates = pd.bdate_range("2023-01-02", periods=130)
+    returns = pd.Series([0.01] * 130, index=dates)
+    rf = pd.Series(0.0, index=dates)
+    metric = svc._compute_beta(
+        object(),  # type: ignore[arg-type]
+        asset_returns=returns,
+        source="tiingo",
+        start=None,
+        end=None,
+        rf=rf,
+    )
+    assert metric.status == "insufficient_observations"
+    assert metric.observations_used == 0
+    assert metric.required == svc.MIN_OBS_BETA
+
+
 def test_compute_beta_delegates_to_the_engine_when_everything_is_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dates = pd.bdate_range("2023-01-02", periods=130)
+    dates = _xnys_dates("2023-01-02", 130)
     spy = Security(id=99, ticker="SPY", name="SPY", exchange="XNAS")
     spy_bars = [_bar(str(d.date()), str(100.0 + i * 0.1)) for i, d in enumerate(dates)]
     monkeypatch.setattr(svc, "get_security_by_ticker", lambda session, ticker: spy)

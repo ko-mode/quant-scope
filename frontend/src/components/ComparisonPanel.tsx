@@ -91,6 +91,12 @@ export function ComparisonPanel({ ticker }: { ticker: string }) {
             <div className="qs-controls__right">
               <span className="qs-source" data-testid="comparison-source">
                 Source: {data?.source ?? "—"} · Adjusted close
+                {query.isPlaceholderData && (
+                  <span className="qs-refreshing" data-testid="comparison-refreshing">
+                    {" "}
+                    · Refreshing…
+                  </span>
+                )}
               </span>
             </div>
           </div>
@@ -133,7 +139,7 @@ export function ComparisonPanel({ ticker }: { ticker: string }) {
           )}
 
           {query.isSuccess && data && data.status === "ok" && data.normalized_performance && (
-            <>
+            <div className={query.isPlaceholderData ? "qs-stale" : undefined}>
               <div className="qs-analytics__meta" data-testid="comparison-meta">
                 {formatDate(data.aligned_start)} – {formatDate(data.aligned_end)} · {data.observations_used}{" "}
                 observations
@@ -149,7 +155,7 @@ export function ComparisonPanel({ ticker }: { ticker: string }) {
                   zeroVarianceTickers={data.zero_variance_tickers}
                 />
               )}
-            </>
+            </div>
           )}
         </>
       )}

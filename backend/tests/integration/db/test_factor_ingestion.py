@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session
 from quantscope.data.factor_ingest import run_factor_ingestion
 from quantscope.data.providers.base import RawFactorReturn
 from quantscope.db.models import DataIngestionRun, FactorReturn
-from quantscope.db.repositories.factors import get_factor_panel, get_factor_series
+from quantscope.db.repositories.factors import (
+    existing_factor_names,
+    get_factor_panel,
+    get_factor_series,
+)
 
 
 class _FakeFactorProvider:
@@ -149,6 +153,29 @@ def test_start_end_trims_the_persisted_window(session: Session) -> None:
     assert report.inserted == 4  # only the second day's 4 factors
     assert report.range_start == datetime.date(2024, 1, 3)
     assert report.range_end == datetime.date(2024, 1, 3)
+    # QS-04: an ordinary bounded ingestion with zero data-quality problems
+    # must report zero validation rejections - the 4 excluded rows (day one)
+    # are outside_requested_window, never conflated with validation_rejected.
+    assert report.validation_rejected == 0
+    assert report.outside_requested_window == 4
+    assert report.reason_counts == {}
+
+
+def test_validation_rejection_is_never_conflated_with_window_exclusion(
+    session: Session,
+) -> None:
+    # One genuinely malformed row (missing-value sentinel) plus a window that
+    # excludes the other, well-formed day - the two counts must stay separate.
+    records = [*_two_days(), _rec("20240104", "rf", "-99.99")]  # sentinel -> rejected
+    report = run_factor_ingestion(
+        session,
+        _FakeFactorProvider(records),
+        start=datetime.date(2024, 1, 3),
+        end=datetime.date(2024, 1, 4),
+    )
+    assert report.validation_rejected == 1  # the sentinel row only
+    assert report.outside_requested_window == 4  # day one's 4 factors
+    assert "missing_factor_value" in report.reason_counts
 
 
 def test_dry_run_writes_nothing_and_records_no_run(session: Session) -> None:
@@ -192,6 +219,36 @@ def test_get_factor_panel_returns_all_requested_factors(session: Session) -> Non
     names = {r.factor_name for r in rows}
     assert names == {"mkt_rf", "smb", "hml", "rf"}
     assert len(rows) == 8
+
+
+# --------------------------------------------------------------------------- #
+# QS-03: distinguishing "never ingested" from "not in this window"
+# --------------------------------------------------------------------------- #
+def test_existing_factor_names_ignores_date_bounds(session: Session) -> None:
+    run_factor_ingestion(session, _FakeFactorProvider(_two_days()))  # 2024-01-02 .. 2024-01-03
+    # A window far outside the ingested dates: get_factor_series/get_factor_panel
+    # would return zero rows here, but the factors themselves ARE ingested.
+    existing = existing_factor_names(
+        session, source="kenneth_french", factor_names=("mkt_rf", "smb", "hml", "rf")
+    )
+    assert existing == {"mkt_rf", "smb", "hml", "rf"}
+
+
+def test_existing_factor_names_excludes_a_never_ingested_factor(session: Session) -> None:
+    # Only rf ingested - mkt_rf/smb/hml were never persisted for this source.
+    provider = _FakeFactorProvider([_rec("20240102", "rf", "0.010")])
+    run_factor_ingestion(session, provider)
+    existing = existing_factor_names(
+        session, source="kenneth_french", factor_names=("mkt_rf", "smb", "hml", "rf")
+    )
+    assert existing == {"rf"}
+
+
+def test_existing_factor_names_empty_for_an_uningested_source(session: Session) -> None:
+    existing = existing_factor_names(
+        session, source="kenneth_french", factor_names=("mkt_rf", "smb", "hml", "rf")
+    )
+    assert existing == set()
 
 
 def test_upsert_uses_exact_decimal_not_float_drift(session: Session) -> None:

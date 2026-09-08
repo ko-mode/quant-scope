@@ -19,7 +19,7 @@ import datetime
 from decimal import Decimal
 from typing import Any
 
-import pandas as pd
+import exchange_calendars as xcals
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -44,7 +44,14 @@ def _adj_path(n: int, *, base: float = 100.0, pattern: list[float] = _R_PATTERN)
 
 
 def _bdates(n: int) -> list[datetime.date]:
-    return [ts.date() for ts in pd.bdate_range(_START, periods=n)]
+    """``n`` genuine, gap-free XNYS sessions from ``_START`` - unlike
+    ``pd.bdate_range``, which includes US market holidays that are not real
+    trading sessions. The analytics service now excludes any return spanning
+    a missing session (QS-01), so fixtures must be calendar-continuous to
+    keep their exact observation-count assertions meaningful."""
+    cal = xcals.get_calendar("XNYS")
+    first = cal.date_to_session(_START, direction="next")
+    return [ts.date() for ts in cal.sessions_window(first, n)]
 
 
 def _sec(session: Session, ticker: str, name: str) -> int:
@@ -129,6 +136,105 @@ def _get(client: TestClient, ticker: str, **params: str) -> dict[str, Any]:
     assert resp.status_code == 200, resp.text
     body: dict[str, Any] = resp.json()
     return body
+
+
+# --------------------------------------------------------------------------- #
+# QS-01: a missing interior XNYS session is never bridged into one return
+# --------------------------------------------------------------------------- #
+def test_missing_interior_session_excludes_one_return_not_bridges_it(
+    api_client: TestClient, session: Session
+) -> None:
+    """130 genuine, gap-free XNYS sessions, with the bar for one interior
+    session (index 64) never persisted at all - a real vendor/ingestion gap,
+    not a malformed row. 129 bars remain; of the 128 adjacent pairs, exactly
+    the one spanning the gap (index 63 -> 65) must be excluded from the
+    return series - never computed as a single, artificially large "daily"
+    return - leaving 127 usable returns.
+    """
+    sec = _sec(session, "GAPPY", "Gappy Corp.")
+    full_dates = _bdates(130)
+    adj = _adj_path(130)
+    gap_pos = 64
+    kept_dates = full_dates[:gap_pos] + full_dates[gap_pos + 1 :]
+    kept_adj = adj[:gap_pos] + adj[gap_pos + 1 :]
+    for day, value in zip(kept_dates, kept_adj, strict=True):
+        session.add(
+            PriceBar(
+                security_id=sec,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("100.000000"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    session.flush()
+    _insert_rf(session, full_dates)
+
+    body = _get(api_client, "GAPPY")
+    assert body["price_observations"] == 129
+    # 129 bars -> 128 adjacent pairs -> 1 excluded (spans the missing session) -> 127
+    assert body["return_observations"] == 127
+    # The excluded adjacency's "return" (adj[65]/adj[63] - 1, spanning two real
+    # trading days at once) must never appear as a max/min daily return - both
+    # remain within the hand-built pattern's true per-day range.
+    pattern_extremes = (min(_R_PATTERN), max(_R_PATTERN))
+    rs = body["return_summary"]
+    tol = 1e-5  # rounding noise from _adj_path's round(..., 6)
+    assert pattern_extremes[0] - tol <= rs["min_daily_return"] <= pattern_extremes[1] + tol
+    assert pattern_extremes[0] - tol <= rs["max_daily_return"] <= pattern_extremes[1] + tol
+
+
+def test_exactly_two_bars_spanning_a_gap_is_insufficient_not_a_crash(
+    api_client: TestClient, session: Session
+) -> None:
+    """Pathological edge case: exactly 2 price bars, and the one possible
+    adjacency between them spans a missing XNYS session. The gap-filtered
+    return series is therefore *empty* even though 2 bars exist - this must
+    report every metric as insufficient (0 observations), not raise (the
+    quant engine's own validation treats a literally empty series as a
+    structural error, reserved for a genuine caller bug, not a thin one)."""
+    sec = _sec(session, "TWOGAP", "Two Bar Gap Co.")
+    full_dates = _bdates(3)  # three consecutive sessions
+    # Keep only the first and third - the middle (real) session is missing,
+    # so the only adjacency between the two kept bars spans a gap.
+    for day, value in zip([full_dates[0], full_dates[2]], [100.0, 101.0], strict=True):
+        session.add(
+            PriceBar(
+                security_id=sec,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("100.000000"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    session.flush()
+    _insert_rf(session, full_dates)
+
+    body = _get(api_client, "TWOGAP")
+    assert body["price_observations"] == 2
+    assert body["return_observations"] == 0
+    for name in (
+        "return_summary",
+        "volatility",
+        "drawdown",
+        "var_es_95",
+        "var_es_99",
+        "sharpe",
+        "beta",
+    ):
+        assert body[name]["status"] == "insufficient_observations", name
+        assert body[name]["observations_used"] == 0
+
+
+def test_fully_continuous_history_has_no_excluded_adjacency(
+    api_client: TestClient, universe: dict[str, Any]
+) -> None:
+    # Regression guard: a genuinely gap-free XNYS window (the shared fixture)
+    # loses nothing to the new adjacency check - 205 bars -> 204 returns,
+    # exactly as before this fix.
+    body = _get(api_client, "NVDA")
+    assert body["price_observations"] == 205
+    assert body["return_observations"] == 204
 
 
 # --------------------------------------------------------------------------- #
@@ -261,14 +367,37 @@ def test_start_after_end_is_422(api_client: TestClient, universe: dict[str, Any]
 
 
 def test_price_sources_are_never_merged(api_client: TestClient, universe: dict[str, Any]) -> None:
-    stooq = _get(api_client, "NVDA", source="stooq")
-    assert stooq["source"] == "stooq"
-    assert stooq["price_observations"] == 5  # not 205, not 210
-    assert stooq["return_observations"] == 4
-
+    # NVDA also has 5 bars under "stooq" (inserted by the `universe` fixture);
+    # the default tiingo-sourced response must never merge them in.
     default = _get(api_client, "NVDA")
     assert default["source"] == "tiingo"
-    assert default["price_observations"] == 205
+    assert default["price_observations"] == 205  # not 210
+
+
+def test_stooq_source_is_rejected_for_analytics(
+    api_client: TestClient, universe: dict[str, Any]
+) -> None:
+    # QS-06: Stooq's single, ambiguous Close has no documented adjustment rule
+    # (ADR 0022) - it must never be presented as verified adjusted-close /
+    # total-return analytics. Rejected at request validation, not silently
+    # computed.
+    resp = api_client.get("/securities/NVDA/analytics", params={"source": "stooq"})
+    assert resp.status_code == 422
+
+
+def test_configured_stooq_default_is_rejected_when_source_is_omitted(
+    api_client: TestClient,
+    universe: dict[str, Any],
+    configured_stooq_provider: None,
+) -> None:
+    # RA-02: QS-06 rejected an *explicit* source=stooq, but a deployment
+    # configured with QUANTSCOPE_PRICE_PROVIDER=stooq could previously reach
+    # analytics simply by omitting `source` altogether, inheriting Stooq
+    # through the settings fallback that FastAPI's query-parameter Literal
+    # validation never sees. This must be rejected the same way.
+    resp = api_client.get("/securities/NVDA/analytics")
+    assert resp.status_code == 422
+    assert "stooq" in resp.json()["detail"].lower()
 
 
 def test_analytics_use_adjusted_close_not_raw_close(
@@ -406,6 +535,43 @@ def test_spy_security_without_price_history_leaves_beta_unavailable(
     assert body["sharpe"]["status"] == "ok"
     assert body["beta"]["status"] == "unavailable"
     assert body["beta"]["reason"] == "benchmark_price_history_unavailable"
+
+
+def test_spy_gapped_to_zero_returns_leaves_beta_insufficient_not_unavailable(
+    session: Session, api_client: TestClient
+) -> None:
+    """SPY-01: SPY has >= 2 persisted bars, but its one possible adjacency
+    spans a missing XNYS session, leaving zero usable benchmark returns.
+    SPY's price history is not missing, so `unavailable` would misrepresent
+    this - beta must report `insufficient_observations` / `observations_used:
+    0`, the same as a thin RF series (same MIN_OBS_BETA gate). NVDA's own
+    history is fully continuous, so sharpe (unaffected by SPY) stays `ok`."""
+    nvda = _sec(session, "NVDA", "NVIDIA Corporation")
+    nvda_dates = _insert_bars(session, nvda, "tiingo", 205)
+    _insert_rf(session, nvda_dates)
+
+    spy = _sec(session, "SPY", "SPDR S&P 500 ETF Trust")
+    full_dates = _bdates(3)  # three consecutive sessions
+    # Keep only the first and third - the middle (real) session is missing,
+    # so the only adjacency between the two kept SPY bars spans a gap.
+    for day, value in zip([full_dates[0], full_dates[2]], [400.0, 401.0], strict=True):
+        session.add(
+            PriceBar(
+                security_id=spy,
+                trade_date=day,
+                source="tiingo",
+                close=Decimal("400.000000"),
+                adj_close=Decimal(str(value)),
+            )
+        )
+    session.flush()
+
+    body = _get(api_client, "NVDA")
+    assert body["sharpe"]["status"] == "ok"
+    assert body["beta"]["status"] == "insufficient_observations"
+    assert body["beta"]["observations_used"] == 0
+    assert body["beta"]["required"] == 126
+    assert body["beta"]["reason"] is None
 
 
 def test_sharpe_undefined_for_zero_excess_variance(

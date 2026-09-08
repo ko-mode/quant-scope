@@ -450,6 +450,21 @@ input::placeholder {
   white-space: nowrap;
 }
 
+/* ---- Stale/refreshing placeholder data (QS-07) ------------------------ */
+/* While a new range/ticker selection's request is in flight, TanStack
+   Query's `keepPreviousData` shows the *previous* selection's data so the
+   view never blanks out - `qs-refreshing` makes that explicit (never silent)
+   and `qs-stale` dims the content it belongs to, so the old numbers are
+   never mistaken for confirmed results for the newly selected range/tickers. */
+.qs-refreshing {
+  font-style: italic;
+  color: var(--fg-faint);
+}
+.qs-stale {
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+
 /* ---- Chart panel -------------------------------------------------------- */
 .qs-chart {
   border: 1px solid var(--border-strong);
